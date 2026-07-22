@@ -190,89 +190,90 @@
 #' # ------------------------------------------------------------------
 #'
 #' counts <- matrix(
-#' sample(0:10, 500, replace = TRUE),
-#' nrow = 50,
-#' dimnames = list(
-#' paste0("gene", 1:50),
-#' paste0("cell", 1:10)
-#' )
+#'   sample(0:10, 500, replace = TRUE),
+#'   nrow = 50,
+#'   dimnames = list(
+#'     paste0("gene", 1:50),
+#'     paste0("cell", 1:10)
+#'   )
 #' )
 #'
 #' scores <- sparoscore(
-#' data = counts,
-#' signatures = c("gene1", "gene2", "gene3")
+#'   data = counts,
+#'   signatures = c("gene1", "gene2", "gene3")
 #' )
 #'
 #' # Multiple signatures
 #' signatures <- list(
-#' SignatureA = c("gene1", "gene2", "gene3"),
-#' SignatureB = c("gene10", "gene11", "gene12")
+#'   SignatureA = c("gene1", "gene2", "gene3"),
+#'   SignatureB = c("gene10", "gene11", "gene12")
 #' )
 #'
 #' scores <- sparoscore(
-#' data = counts,
-#' signatures = signatures
+#'   data = counts,
+#'   signatures = signatures
 #' )
 #'
 #' # ------------------------------------------------------------------
 #' # Seurat object
 #' # ------------------------------------------------------------------
 #'
-#' \donttest{
+#' seurat_object <- Seurat::CreateSeuratObject(counts = counts)
+#'
 #' seurat_object <- sparoscore(
-#' data = seurat_object,
-#' signatures = c("CCR7", "IL7R", "LTB")
+#'   data = seurat_object,
+#'   signatures = c("gene1", "gene2", "gene3")
 #' )
 #'
 #' # use custom count caps to measure distance from zero expression
-#' zero_counts <- rep(0, nrow(seurat_object[[]]))
-#' names(zero_counts) <- rownames(seurat_object[[]])
+#' zero_counts <- setNames(rep(0, ncol(seurat_object)), colnames(seurat_object))
+#'
 #' seurat_object <- sparoscore(
-#' data = seurat_object,
-#' signatures = c("CCR7", "IL7R", "LTB")
-#' count_caps <- zero_counts
+#'   data = seurat_object,
+#'   signatures = c("gene1", "gene2", "gene3"),
+#'   count_caps = zero_counts
 #' )
 #'
-#'
-#' # use custom rank caps to consider all the genes
-#' custom_ranks <- rep(dim(seurat_object)[1], seurat_object[2])
-#' names(custom_ranks) <- rownames(seurat_object[[]])
-#' seurat_object <- sparoscore(
-#' data = seurat_object,
-#' signatures = c("CCR7", "IL7R", "LTB")
-#' rank_caps <- custom_ranks
+#' # use custom rank caps to consider top 5% genes
+#' custom_ranks <- setNames(
+#'   rep(0.05*nrow(seurat_object), ncol(seurat_object)),
+#'   colnames(seurat_object)
 #' )
 #'
+#' seurat_object <- sparoscore(
+#'   data = seurat_object,
+#'   signatures = c("gene1", "gene2", "gene3"),
+#'   rank_caps = custom_ranks
+#' )
 #'
 #' # Reuse previously computed ranks
 #' seurat_object <- sparoscore(
-#' data = seurat_object,
-#' signatures = c("CCR7", "IL7R", "LTB"),
-#' data_has_ranks = TRUE,
-#' layer = "ranks"
+#'   data = seurat_object,
+#'   signatures = c("gene1", "gene2", "gene3"),
+#'   data_has_ranks = TRUE,
+#'   layer = "ranks"
 #' )
-#' }
 #'
 #' # ------------------------------------------------------------------
 #' # SingleCellExperiment / SummarizedExperiment
 #' # ------------------------------------------------------------------
 #'
-#' \donttest{
+#' sce <- SingleCellExperiment::SingleCellExperiment(
+#'   assays = list(counts = counts)
+#' )
+#'
 #' sce <- sparoscore(
-#' data = sce,
-#' signatures = c("CCR7", "IL7R", "LTB")
+#'   data = sce,
+#'   signatures = c("gene1", "gene2", "gene3")
 #' )
 #'
 #' # Reuse previously computed ranks
 #' sce <- sparoscore(
-#' data = sce,
-#' signatures = c("CCR7", "IL7R", "LTB"),
-#' data_has_ranks = TRUE,
-#' assay = "ranks"
+#'   data = sce,
+#'   signatures = c("gene1", "gene2", "gene3"),
+#'   data_has_ranks = TRUE,
+#'   assay = "ranks"
 #' )
-#' }
-#'
-#'
 
 
 

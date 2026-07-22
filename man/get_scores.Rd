@@ -85,7 +85,7 @@ ranks.}
  Defaults to NULL.
 
 When down_signatures is not NULL,
-Final Score = Score(signatures) - Score(down_signatures)}
+Final Score <- Score(signatures) - Score(down_signatures)}
 
 \item{handle_missing_genes}{Character string specifying how signature genes
 absent from ranks should be handled.

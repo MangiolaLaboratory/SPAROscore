@@ -35,7 +35,7 @@
 #' signature genes are found in `all_genes`, the function stops with an error.
 #'
 #'
-#' @examples
+#' Example of how to use the function
 #' validate_signature(
 #'   signature = c("CCR7", "CD62L"),
 #'   all_genes = c("CCR7", "CD27", "CD28")
@@ -102,7 +102,7 @@ validate_signature <- function(signature, all_genes){
 #' unchanged.
 #'
 #'
-#' @examples
+#' Example of how to use the function
 #' impute_missing_gene_ranks(
 #'   incomplete_ranks = c(1, 2, 3, 4, 5, 6, 7, 8),
 #'   rank_cap = 5,
@@ -157,7 +157,7 @@ impute_missing_gene_ranks <- function(incomplete_ranks,rank_cap, missing_genes){
 #' supported.
 #'
 #'
-#' @examples
+#' Example of how to use the function
 #' # Base matrix
 #' mat <- matrix(1:6, nrow = 2)
 #' append_to_matrix_like_object(mat, c(7, 8, 9))
@@ -228,8 +228,7 @@ append_to_matrix_like_object <- function(matrix_like_object, numeric_vector){
 #' ignored when computing the mean log expression.
 #'
 #'
-#' @examples
-#' \donttest{
+#' Example of how to use the function
 #' counts <- matrix(
 #' c(0, 5, 10,
 #' 2, 0, 20,
@@ -238,7 +237,7 @@ append_to_matrix_like_object <- function(matrix_like_object, numeric_vector){
 #' )
 #'
 #' compute_geometric_average(counts)
-#'}
+#'
 #'
 compute_geometric_average <-function(counts){
     message("SPAROscore says: Calculating column-wise geometric averages")
@@ -314,7 +313,7 @@ compute_geometric_average <-function(counts){
 #' performed on a base matrix, sparse matrix, or delayed matrix object.
 #'
 #'
-#' @examples
+#' Example of how to use the function
 #' # Compute ranks using geometric mean expression as rank caps
 #' rank_results <- get_ranks_from_counts(counts)
 #'
@@ -471,7 +470,7 @@ get_ranks_from_counts <- function(counts,
 #' tend to have higher expression ranks relative to the cap.
 #'
 #'
-#' @examples
+#' Example of how to use the function
 #' # validate gene signatures
 #' num_genes <- nrow(counts)
 #' valid_gene_signature <- validate_signature(signatures,
@@ -589,7 +588,7 @@ compute_sparoscore_per_cell <- function(signature_ranks_vector, rank_cap,
 #' occupy higher expression ranks relative to the column-specific rank cap.
 #'
 #'
-#' @examples
+#' Example of how to use the function
 #' # Generate ranks and rank caps
 #' rank_results <- get_ranks(counts)
 #'
@@ -724,7 +723,7 @@ compute_sparoscores <- function(ranks,
 #'  Defaults to NULL.
 #'
 #' When down_signatures is not NULL,
-#' Final Score = Score(signatures) - Score(down_signatures)
+#' Final Score <- Score(signatures) - Score(down_signatures)
 #'
 #'
 #' @param data_has_ranks Logical indicating whether matrix_object contains
@@ -779,7 +778,7 @@ compute_sparoscores <- function(ranks,
 #'
 #' SPAROscores are computed using get_scores().
 #'
-#' @examples
+#' Example of how to use the function
 #' # Compute scores directly from expression data
 #' scores <- augment_sparoscores_matrix(
 #' matrix_object = counts,
@@ -896,7 +895,7 @@ augment_sparoscores_matrix <- function(matrix_object,
 #'  Defaults to NULL.
 #'
 #' When down_signatures is not NULL,
-#' Final Score = Score(signatures) - Score(down_signatures)
+#' Final Score <- Score(signatures) - Score(down_signatures)
 #'
 #'
 #' @param data_has_ranks Logical indicating whether previously
@@ -976,7 +975,7 @@ augment_sparoscores_matrix <- function(matrix_object,
 #' Computed scores and rank caps are appended to the Seurat object's metadata
 #' and can be accessed with seurat_object[[]].
 #'
-#' @examples
+#' Example of how to use the function
 #' # Compute SPAROscores from RNA counts
 #' seurat_object <- augment_sparoscores_seurat(
 #' seurat_object = seurat_object,
@@ -1144,7 +1143,7 @@ augment_sparoscores_seurat <- function(seurat_object,
 #'  Defaults to NULL.
 #'
 #' When down_signatures is not NULL,
-#' Final Score = Score(signatures) - Score(down_signatures)
+#' Final Score <- Score(signatures) - Score(down_signatures)
 #'
 #'
 #' @param data_has_ranks Logical indicating whether the specified assay already
@@ -1208,7 +1207,7 @@ augment_sparoscores_seurat <- function(seurat_object,
 #' Computed scores and rank caps are appended to colData() and can be
 #' accessed using SummarizedExperiment::colData().
 #'
-#' @examples
+#' Example of how to use the function
 #' library(SingleCellExperiment)
 #'
 #' sce <- augment_sparoscores_sce(

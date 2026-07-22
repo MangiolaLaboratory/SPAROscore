@@ -74,7 +74,7 @@ untreated controls. We quantify the activity of a glucocorticoid response
 signature derived from the original publication.
 
 **Single-cell RNA-seq**: the interferon-β stimulation dataset from Kang et al., 
-available through the SeuratData package. This dataset consists of 
+available through the muscData package. This dataset consists of 
 peripheral blood mononuclear cells (PBMCs) collected before and after 
 IFN-β stimulation, allowing the activation of interferon signalling pathways to 
 be examined at single-cell resolution.
@@ -295,10 +295,14 @@ cell types and experimental conditions to be explored.
 
 In this example, the IFN-β stimulation dataset from 
 [Kang et al.](https://doi.org/10.1038/nbt.4042), which is available through the 
-muscData package will be used. We will work with a seurat object of the same to 
-showcase the versatality of SPAROscore. The dataset consists of ~29,000 
+muscData package will be used. The dataset consists of ~29,000 
 peripheral blood mononuclear cells (PBMCs) collected from 
 lupus patients before and after stimulation with interferon-β (IFN-β). 
+The colData contains the cell type annotations in the `cell` column, 
+treatment condition in the `stim` column, donor_id in the `ind` column and 
+multiplet status in the `multiplets` column. For the simplicity of this 
+vignette, cells from a  a single sample will be analysed. We will work with a 
+seurat object of the same data to demonstrate the versatility of SPAROscore.
 
 To quantify interferon signalling, the Hallmark Interferon Alpha Response 
 gene set from the Molecular Signatures Database (MSigDB) will be used. 
@@ -311,6 +315,21 @@ conserved transcriptional response induced by both IFN-α and IFN-β signalling.
 ```{r sc-1, warning=FALSE}
 # load the ifnb data from the muscData library
 ifnb_sce_data <- Kang18_8vs8()
+
+# view the colData
+head(colData(ifnb_sce_data))
+
+# check how many genes * cells are present in the original dataset
+dim(ifnb_sce_data)
+
+# subset the original data to work with only one sample and singlets
+ifnb_sce_data <- ifnb_sce_data[,
+  (colData(ifnb_sce_data)$ind == "107" &
+  colData(ifnb_sce_data)$multiplets == "singlet")
+]
+
+# check how many genes * cells are present in the filtered dataset
+dim(ifnb_sce_data)
 
 # working with a seurat object
 ifnb <- CreateSeuratObject(
@@ -330,7 +349,7 @@ head(ifnb[[]])
 The Seurat object contains gene expression of PBMCs under two experimental 
 conditions: unstimulated cells (CTRL), and celle stimulated with 
 interferron-beta (STIM). Along with the experimental condition, the cell types
-are also given under the `seurat_annotations` metadata column.
+are also given under the `cell` metadata column.
 
 ## Load the gene signature from MSigDB
 
@@ -500,7 +519,7 @@ differential expression and pathway analyses, as they provide more
 stable estimates of average expression for each biological group.
 
 Here, we aggregate the IFN-β dataset by both the cell type 
-annotation (seurat_annotations) and stimulation condition (stim). 
+annotation (cell) and stimulation condition (stim). 
 We then compute SPAROscore on the resulting pseudo-bulk expression matrix to 
 quantify interferon pathway activity across each cell population.
 

@@ -32,9 +32,9 @@ where \eqn{x} represents the expression values in a column.
 A pseudocount of 1 is added to all expression values before log
 transformation to avoid undefined values for zero counts. Missing values are
 ignored when computing the mean log expression.
-}
-\examples{
-\dontrun{
+
+
+Example of how to use the function
 counts <- matrix(
 c(0, 5, 10,
 2, 0, 20,
@@ -43,7 +43,5 @@ nrow = 3
 )
 
 compute_geometric_average(counts)
-}
-
 }
 \keyword{internal}

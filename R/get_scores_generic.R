@@ -175,7 +175,7 @@ setMethod("get_scores",
                                                        "SPAROscore")
 
                   # subtract down-regulation scores from original scores
-                  sparoscores = sparoscores - sparoscores_down
+                  sparoscores <- sparoscores - sparoscores_down
 
                   # codeblock to return both up and down signature scores
                   # subtract down-regulation scores from original scores
@@ -253,7 +253,7 @@ setMethod("get_scores",
                                                 colnames(sparoscores_down))
 
                   # subtract down-regulation scores from original scores
-                  sparoscores = sparoscores - sparoscores_down
+                  sparoscores <- sparoscores - sparoscores_down
 
               }
 
