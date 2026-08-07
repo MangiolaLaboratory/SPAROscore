@@ -2,7 +2,7 @@ Type: Package
 Package: SPAROscore
 Title: A package to compute gene signature scores from transcriptomics
     data
-Version: 0.99.2
+Version: 0.99.3
 Authors@R: 
     person("Venkatesh", "Kamaraj", , "venkatesh.kamaraj@adelaide.edu.au", role = c("aut", "cre"),
            comment = c(ORCID = "0009-0008-7309-9810"))
