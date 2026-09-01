@@ -1,0 +1,735 @@
+---
+title: "Scenario simulator"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 8,
+  fig.height = 4
+)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(tidytargets)
+library(crew)
+```
+
+Signature gene ranks are drawn as **distinct** positions in `1:gene_size`, because
+real ranks are a permutation: two genes cannot occupy the same slot. The beta
+shape sets where the signature prefers to sit, and sampling without replacement
+enforces that only `gene_size - k` slots exist above position `k`.
+
+The shape family is chosen so each scenario has its mode on the boundary and a
+monotone density, which keeps the benchmark clean:
+
+| scenario | weights | mode |
+|---|---|---|
+| UP | `Beta(shape, 1)` | at 1 |
+| DOWN | `Beta(1, shape)` | at 0 |
+| flat | `Beta(1, 1)` | none (uniform) |
+
+A mean pinned near 1 is not available here: a 1000-gene signature packed into the
+top 1000 slots already has mean 0.95, so asking for 0.98 forces the sampler to
+spill downward and produces a hump instead of a boundary mode.
+
+The rank cap is a proxy for sparsity. Genes below it are tied at the bottom and
+carry no information, so they score 0. A bigger cell lowers the cap and lets more
+signature genes clear it; the score must not drift upward for that reason alone.
+The test is therefore on the **gradient** of score against `rank_cap`, which
+should be flat.
+
+## Functions
+
+```{r functions}
+# responder_fraction < 1 mixes responders with genes that sit at background,
+# which is the realistic case of a signature where only part of it reacts.
+simulate_peaks <- function(direction = "flat",
+                           shape = 5,
+                           responder_fraction = 1,
+                           signature_size = 1000L,
+                           gene_size = 10000L) {
+  shapes <- switch(direction,
+    up   = c(shape, 1),
+    down = c(1, shape),
+    flat = c(1, 1)
+  )
+  slots <- seq_len(gene_size)
+  responders <- stats::dbeta((slots - 0.5) / gene_size, shapes[1], shapes[2])
+  weights <- responder_fraction * responders + (1 - responder_fraction)
+  sort(sample(slots, signature_size, replace = FALSE, prob = weights))
+}
+
+# Exponential tilt f(x) ~ exp(theta * x) on [0, 1]: one unconstrained parameter,
+# UP for theta > 0 and DOWN for theta < 0, meeting smoothly at the uniform. The
+# Beta parameterisation would kink at 0 and break the curvature estimate there.
+# Z(theta) = (e^theta - 1)/theta is positive on both sides, so log it on
+# magnitudes; the small-theta branches are the series expansions.
+tilt <- list(
+  logZ = function(theta) {
+    if (abs(theta) < 1e-6) log1p(theta / 2 + theta^2 / 6)
+    else log(abs(expm1(theta))) - log(abs(theta))
+  },
+  mean = function(theta) {
+    if (abs(theta) < 1e-6) 0.5 + theta / 12 else 1 / (1 - exp(-theta)) - 1 / theta
+  },
+  cdf = function(q, theta) {
+    if (abs(theta) < 1e-6) q else expm1(theta * q) / expm1(theta)
+  },
+  # E[x | x <= q], the value the fit imputes for every censored gene.
+  cond_mean = function(q, theta) {
+    if (abs(theta) < 1e-6) q / 2 else q / (1 - exp(-theta * q)) - 1 / theta
+  }
+)
+
+# Four ways to turn one (peaks, rank_cap) pair into a score, all on 0-1, plus
+# diagnostics for the last one. local() puts `tilt` in the function's enclosing
+# environment so it travels with the function to a parallel worker.
+score_variants <- local({
+  tilt <- tilt
+  function(peaks, rank_cap, gene_size = 10000L) {
+  detected <- peaks > rank_cap
+  effective_size <- sum(detected)
+  signature_size <- length(peaks)
+  censored_size <- signature_size - effective_size
+  relative <- sum(peaks[detected] - rank_cap) / (gene_size - rank_cap)
+
+  # Tie-aware Mann-Whitney against a fixed background of all gene_size genes.
+  # A detected gene outranks every gene below it; a censored gene sits at 0 and
+  # ties with the rank_cap other censored genes, earning half credit on each.
+  wins <- sum(peaks[detected] - 1)
+  ties <- censored_size * rank_cap / 2
+
+  # Censored MLE: detected genes contribute their exact position, censored genes
+  # contribute only the probability of falling below the cap. Nothing is
+  # rescaled, so the cap enters the likelihood rather than the estimate.
+  positions <- (peaks - 0.5) / gene_size
+  cap_quantile <- rank_cap / gene_size
+  # The data enter only through these three numbers, so each evaluation of the
+  # likelihood is O(1) rather than O(signature_size).
+  position_sum <- sum(positions[detected])
+  negative_loglik <- function(theta) {
+    -(theta * position_sum - effective_size * tilt$logZ(theta) +
+      censored_size * log(max(tilt$cdf(cap_quantile, theta), 1e-300)))
+  }
+  theta <- stats::optimize(negative_loglik, c(-60, 60), tol = 1e-8)$minimum
+
+  # Observed information by central difference, then the delta method onto the
+  # 0-1 mean scale. Once the signature is fully censored the likelihood flattens
+  # and this blows up, which is the estimator declaring itself undetermined.
+  step <- 1e-3
+  curvature <- (negative_loglik(theta + step) - 2 * negative_loglik(theta) +
+                negative_loglik(theta - step)) / step^2
+  slope <- (tilt$mean(theta + step) - tilt$mean(theta - step)) / (2 * step)
+
+  c(
+    over_total     = relative / signature_size,
+    over_effective = if (effective_size > 0) relative / effective_size else 0,
+    auc            = (wins + ties) / (signature_size * (gene_size - 1)),
+    mle            = tilt$mean(theta),
+    mle_se         = abs(slope) / sqrt(max(curvature, 1e-12)),
+    mle_theta      = theta,
+    # Worst case imputation error, assuming nothing at all about the true shape:
+    # the score and the truth differ only in a conditional mean that must lie in
+    # [0, cap], so the gap cannot exceed the censored fraction times the cap.
+    bias_bound     = (censored_size / signature_size) * cap_quantile
+  )
+}})
+
+# One signature per replicate, scored at every cap: the cap effect is then
+# within-signature rather than confounded with draw-to-draw noise.
+score_one <- function(settings, rank_caps, simulate_peaks, score_variants) {
+  peaks <- simulate_peaks(
+    direction = settings$direction,
+    responder_fraction = settings$responder_fraction
+  )
+  scored <- vapply(rank_caps, function(cap) score_variants(peaks, cap), numeric(7))
+  data.frame(
+    scenario = settings$scenario,
+    rep = settings$rep,
+    rank_cap = rank_caps,
+    t(scored)
+  )
+}
+
+# Scale-free readout: how much of the score's spread the cap explains, and how
+# far the fitted curve travels across the swept range relative to its own mean.
+methods_all <- c("mle", "auc", "over_effective", "over_total")
+
+# Bias and dispersion are reported separately: an estimator that keeps its mean
+# and widens honestly is preferable to one that drifts while looking confident.
+gradient_table <- function(sweep, scenario, methods = methods_all) {
+  dat <- sweep[sweep$scenario == scenario, ]
+  caps <- sort(unique(dat$rank_cap))
+  do.call(rbind, lapply(methods, function(method) {
+    y <- dat[[method]]
+    x <- dat$rank_cap
+    model <- stats::lm(y ~ x + I(x^2))
+    fitted_curve <- stats::predict(model, data.frame(x = caps))
+    by_cap <- tapply(y, x, stats::sd)
+    data.frame(
+      method = method,
+      mean_score = mean(y),
+      drift = max(fitted_curve) - min(fitted_curve),
+      relative_drift = (max(fitted_curve) - min(fitted_curve)) / max(abs(mean(y)), 1e-9),
+      sd_low_cap = by_cap[[1]],
+      sd_high_cap = by_cap[[length(by_cap)]],
+      sd_ratio = by_cap[[length(by_cap)]] / max(by_cap[[1]], 1e-9)
+    )
+  }))
+}
+
+method_colours <- c(over_total = "#BBBBBB", over_effective = "#C0392B",
+                    auc = "#2E86C1", mle = "#1E8449")
+
+to_long <- function(dat) {
+  bind_rows(lapply(methods_all, function(m) {
+    data.frame(rank_cap = dat$rank_cap, score = dat[[m]], method = m)
+  }))
+}
+
+plot_invariance <- function(sweep, scenario) {
+  long <- to_long(sweep[sweep$scenario == scenario, ])
+  ggplot(long, aes(x = rank_cap, y = score, colour = method)) +
+    geom_point(alpha = 0.2, size = 0.8) +
+    geom_smooth(method = "lm", formula = y ~ x + I(x^2), se = FALSE, linewidth = 0.7) +
+    geom_hline(yintercept = 0.5, linetype = "dotted", colour = "grey40") +
+    scale_colour_manual(values = method_colours) +
+    coord_cartesian(ylim = c(0, 1)) +
+    labs(x = "rank_cap", y = "score", colour = NULL, subtitle = scenario) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+
+# An SE is only worth reporting if it matches the spread actually observed across
+# replicates. The ratio should sit near 1 while the estimate is usable, and run
+# away once the signature is fully censored.
+se_calibration <- function(sweep, scenario) {
+  dat <- sweep[sweep$scenario == scenario, ]
+  dat |>
+    group_by(rank_cap) |>
+    summarise(
+      mle_mean = mean(mle),
+      empirical_sd = sd(mle),
+      model_se = stats::median(mle_se),
+      .groups = "drop"
+    ) |>
+    mutate(se_over_sd = model_se / empirical_sd) |>
+    filter(rank_cap %in% seq(500, 9500, by = 1000)) |>
+    as.data.frame()
+}
+
+plot_se_calibration <- function(sweep, scenario) {
+  dat <- sweep[sweep$scenario == scenario, ]
+  spread <- dat |>
+    group_by(rank_cap) |>
+    summarise(mle = mean(mle), lower = mean(mle) - stats::median(mle_se),
+              upper = mean(mle) + stats::median(mle_se), .groups = "drop")
+  ggplot(spread, aes(x = rank_cap, y = mle)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), fill = "#1E8449", alpha = 0.25) +
+    geom_line(colour = "#1E8449", linewidth = 0.8) +
+    geom_hline(yintercept = 0.5, linetype = "dotted", colour = "grey40") +
+    coord_cartesian(ylim = c(0, 1)) +
+    labs(x = "rank_cap", y = "mle +/- model SE", subtitle = scenario) +
+    theme_minimal()
+}
+
+# The complement of the invariance plot: does the spread widen as information
+# disappears, or does the estimator collapse onto a constant and look certain?
+plot_dispersion <- function(sweep, scenario) {
+  long <- to_long(sweep[sweep$scenario == scenario, ])
+  spread <- long |>
+    group_by(method, rank_cap) |>
+    summarise(sd = sd(score), .groups = "drop")
+  ggplot(spread, aes(x = rank_cap, y = sd, colour = method)) +
+    geom_line(linewidth = 0.7) +
+    scale_colour_manual(values = method_colours) +
+    labs(x = "rank_cap", y = "SD across replicates", colour = NULL, subtitle = scenario) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+
+# Core plot: density over a barcode, with the cap and the scores annotated.
+plot_peaks <- function(peaks, rank_cap, gene_size = 10000L, title = NULL) {
+  df <- data.frame(peak = peaks)
+  detected <- peaks > rank_cap
+  scores <- score_variants(peaks, rank_cap, gene_size)
+  label <- paste0(
+    "effective_signature_size = ", sum(detected),
+    "\nmle = ", round(scores[["mle"]], 3), " +/- ", signif(scores[["mle_se"]], 2),
+    "\nauc = ", round(scores[["auc"]], 3),
+    "\nover_effective = ", round(scores[["over_effective"]], 3)
+  )
+
+  p_density <- ggplot(df, aes(x = peak)) +
+    geom_density(fill = "#4C97CB", alpha = 0.6, colour = NA) +
+    geom_vline(xintercept = rank_cap, colour = "red", linewidth = 0.8) +
+    annotate("text", x = gene_size, y = Inf, label = label,
+             hjust = 1.05, vjust = 1.2, size = 3.5, colour = "red") +
+    scale_x_continuous(limits = c(1, gene_size), expand = c(0, 0)) +
+    labs(x = NULL, y = "Density", title = title) +
+    theme_minimal() +
+    theme(panel.grid.minor = element_blank())
+
+  p_barcode <- ggplot(df, aes(x = peak, y = 0)) +
+    geom_segment(aes(xend = peak, yend = 1), linewidth = 0.35, colour = "#333333") +
+    scale_x_continuous(limits = c(1, gene_size), expand = c(0, 0)) +
+    scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
+    labs(x = "Peak", y = NULL) +
+    theme_void() +
+    theme(axis.text.x = element_text(), axis.title.x = element_text())
+
+  p_density / p_barcode + plot_layout(heights = c(2, 1))
+}
+
+plot_peak_samples <- function(direction,
+                              rank_cap,
+                              responder_fraction = 1,
+                              gene_size = 10000L,
+                              signature_size = 1000L) {
+  plot_peaks(
+    simulate_peaks(
+      direction = direction,
+      responder_fraction = responder_fraction,
+      signature_size = signature_size,
+      gene_size = gene_size
+    ),
+    rank_cap = rank_cap,
+    gene_size = gene_size
+  )
+}
+
+plot_awkward_shape <- function(shape_name, rank_cap, gene_size = 10000L, seed = 31) {
+  set.seed(seed)
+  peaks <- awkward_shapes[[shape_name]]()
+  plot_peaks(peaks, rank_cap, gene_size,
+             title = paste0(shape_name, "  |  rank_cap = ", rank_cap))
+}
+
+# Signatures the tilt family cannot represent, for the assumptions section.
+awkward_shapes <- list(
+  "monotone UP (not clustered)" = function() {
+    slots <- seq_len(10000L)
+    sort(sample(slots, 1000L, prob = stats::dbeta((slots - 0.5) / 10000, 5, 1)))
+  },
+  "band 5000-7000"          = function() sort(sample(5001:7000, 1000L)),
+  "band 2000-4000"          = function() sort(sample(2001:4000, 1000L)),
+  "narrow block at 6000"    = function() sort(sample(5501:6500, 1000L)),
+  "two clusters, 2k and 9k" = function() sort(c(sample(1500:2500, 500L),
+                                                sample(8500:9500, 500L)))
+)
+
+# Does the detected part of the signature actually look like the fitted tilt?
+# A standard error cannot see model misspecification, but this can.
+tilt_gof <- function(peaks, rank_cap, theta, gene_size = 10000L) {
+  above <- sort((peaks[peaks > rank_cap] - 0.5) / gene_size)
+  # With nothing detected there is no fitted shape left to test.
+  if (length(above) < 5) return(NA_real_)
+  below_cap <- tilt$cdf(rank_cap / gene_size, theta)
+  expected <- (vapply(above, tilt$cdf, numeric(1), theta = theta) - below_cap) /
+    (1 - below_cap)
+  max(abs(expected - (seq_along(above) - 0.5) / length(above)))
+}
+
+shape_table <- function(shape_name, caps, gene_size = 10000L, seed = 31) {
+  set.seed(seed)
+  peaks <- awkward_shapes[[shape_name]]()
+  truth <- mean((peaks - 0.5) / gene_size)
+  do.call(rbind, lapply(caps, function(cap) {
+    scored <- score_variants(peaks, cap, gene_size)
+    data.frame(
+      cap = cap,
+      detected = sum(peaks > cap),
+      truth = truth,
+      mle = scored[["mle"]],
+      bias = scored[["mle"]] - truth,
+      bound = scored[["bias_bound"]],
+      se = scored[["mle_se"]],
+      ks = tilt_gof(peaks, cap, scored[["mle_theta"]], gene_size)
+    )
+  }))
+}
+```
+
+## The four variants
+
+Two things must be judged separately. An estimator should keep its **mean** as the
+cap moves, and its **spread** should widen as information disappears. Drifting is
+a bias; narrowing while drifting is worse, because the score then looks confident
+about the wrong answer. Each scenario below therefore gets both an invariance plot
+and a dispersion plot.
+
+`over_effective` rescales the surviving ranks onto `(cap, G]`, so it asks where the
+detected genes sit *within the observable window*. It is **exactly** unbiased for
+the DOWN and flat scenarios, and not by luck: for `f(x) ~ (1-x)^(a-1)`, setting
+`u = (x - c)/(1 - c)` gives `1 - x = (1 - c)(1 - u)`, so the truncated density is
+`~ (1 - u)^(a-1)`, the same family with the same parameter, and `E[u] = 1/(1 + a)`
+at every cap. The UP family `x^(a-1)` is *not* closed under that operation: it
+flattens toward uniform, so the score has to decay to 0.5. That decay is the
+normaliser, not the biology. `over_total` inherits the same artefact and decays
+with the detected fraction on top of it.
+
+`auc` compares every gene against a fixed background of all `G` genes, so nothing
+is rescaled when the cap moves. It is algebraically the same statistic as imputing
+censored genes at `cap / 2` (the two agree to 1e-5), but the Mann-Whitney form
+makes the tie convention explicit. It holds its mean for UP. Its weakness is the
+dispersion plot: as the cap rises, more genes collapse onto the identical imputed
+value, so its SD *falls* and stops representing uncertainty.
+
+`mle` is the score to use. It fits the exponential tilt `f(x) ~ exp(theta * x)` by
+censored maximum likelihood: detected genes contribute their exact position, and
+the rest contribute only the probability of falling below the cap. The cap enters
+the likelihood instead of the estimate, so nothing is rescaled, the mean holds in
+both directions, and the spread widens honestly.
+
+It also reports `mle_se`, from the curvature of the censored likelihood carried
+onto the 0-1 scale by the delta method. **That removes the need for a separate
+"undetermined" flag.** Once the signature is fully censored the likelihood
+flattens, `theta` runs toward the edge of its range, and the standard error blows
+up by orders of magnitude: the point estimate still says "maximally down" while
+the error bar says the number carries no information. Anything consuming the score
+should weight by `1 / mle_se^2` rather than test a boundary condition.
+
+One caveat stands. In the mixture scenarios *every* estimator drifts, because
+raising the cap preferentially censors whichever component sits lower and the
+detected set becomes enriched for the survivor. That is a property of censoring,
+not of any normaliser, so it cannot be fixed by a better denominator -- only by
+modelling the two components explicitly.
+
+```{r invariance-pipeline, include = FALSE}
+gene_size <- 10000L
+n_rep <- 40
+rank_caps <- seq(500, 9500, by = 200)
+
+grid <- expand.grid(
+  rep = seq_len(n_rep),
+  direction = c("up", "down", "flat"),
+  responder_fraction = c(1, 0.3),
+  stringsAsFactors = FALSE
+)
+# A partially-responding flat signature is still flat, so keep only one copy.
+grid <- grid[!(grid$direction == "flat" & grid$responder_fraction != 1), ]
+grid$scenario <- paste0(grid$direction, " (", grid$responder_fraction * 100, "% responders)")
+
+pipe <- tt_initialise(
+  store = "tidytargets-rank-cap-sweep",
+  computing_resources = crew_controller_local(
+    workers = max(1L, parallel::detectCores() - 1L)
+  ),
+  verbosity = "silent"
+) |>
+  tt_data(simulate_peaks) |>
+  tt_data(score_variants) |>
+  tt_data(score_one) |>
+  tt_data(rank_caps) |>
+  tt_data_list(settings <- grid |> group_split(row_number())) |>
+  tt_iterate(
+    sim <- score_one(settings, rank_caps, simulate_peaks, score_variants)
+  ) |>
+  tt_merge(sweep <- bind_rows(sim))
+
+invisible(tt_evaluate(pipe))
+sweep <- tt_explore(pipe, sweep)
+```
+
+## Scenario 1 — Signature UP (mode at 1)
+
+### Big cell (rank_cap = 5000)
+
+```{r up-big-cell}
+set.seed(1)
+plot_peak_samples(direction = "up", rank_cap = 5000)
+```
+
+### Small cell (rank_cap = 7500)
+
+```{r up-small-cell}
+set.seed(1)
+plot_peak_samples(direction = "up", rank_cap = 7500)
+```
+
+### Rank-cap invariance
+
+```{r up-invariance, fig.height = 5}
+plot_invariance(sweep, "up (100% responders)")
+plot_dispersion(sweep, "up (100% responders)")
+gradient_table(sweep, "up (100% responders)")
+```
+
+Point estimate with its likelihood-based standard error:
+
+```{r up-invariance-se, fig.height = 3.2}
+plot_se_calibration(sweep, "up (100% responders)")
+se_calibration(sweep, "up (100% responders)")
+```
+
+## Scenario 2 — Signature DOWN (mode at 0)
+
+### Big cell (rank_cap = 5000)
+
+```{r down-big-cell}
+set.seed(1)
+plot_peak_samples(direction = "down", rank_cap = 5000)
+```
+
+### Small cell (rank_cap = 7500)
+
+```{r down-small-cell}
+set.seed(1)
+plot_peak_samples(direction = "down", rank_cap = 7500)
+```
+
+### Rank-cap invariance
+
+The score must fall to 0 once the whole signature is tied below the cap. What it
+must not do is climb as the cap drops, which would be depth inflating a signature
+that is genuinely off.
+
+```{r down-invariance, fig.height = 5}
+plot_invariance(sweep, "down (100% responders)")
+plot_dispersion(sweep, "down (100% responders)")
+gradient_table(sweep, "down (100% responders)")
+```
+
+Point estimate with its likelihood-based standard error:
+
+```{r down-invariance-se, fig.height = 3.2}
+plot_se_calibration(sweep, "down (100% responders)")
+se_calibration(sweep, "down (100% responders)")
+```
+
+## Scenario 3 — Signature random (flat)
+
+### Big cell (rank_cap = 5000)
+
+```{r random-big-cell}
+set.seed(1)
+plot_peak_samples(direction = "flat", rank_cap = 5000)
+```
+
+### Small cell (rank_cap = 7500)
+
+```{r random-small-cell}
+set.seed(1)
+plot_peak_samples(direction = "flat", rank_cap = 7500)
+```
+
+### Rank-cap invariance
+
+```{r random-invariance, fig.height = 5}
+plot_invariance(sweep, "flat (100% responders)")
+plot_dispersion(sweep, "flat (100% responders)")
+gradient_table(sweep, "flat (100% responders)")
+```
+
+Point estimate with its likelihood-based standard error:
+
+```{r random-invariance-se, fig.height = 3.2}
+plot_se_calibration(sweep, "flat (100% responders)")
+se_calibration(sweep, "flat (100% responders)")
+```
+
+## Scenario 4 — Partial responders (30% of the signature reacts)
+
+Only 30% of the signature genes follow the direction; the remaining 70% sit at
+background. This is the case that a one-parameter monotone family cannot
+represent, so it is the fair test of the censored MLE.
+
+### UP, 30% responders
+
+```{r mixed-up-cell}
+set.seed(1)
+plot_peak_samples(direction = "up", rank_cap = 5000, responder_fraction = 0.3)
+```
+
+```{r mixed-up-invariance, fig.height = 5}
+plot_invariance(sweep, "up (30% responders)")
+plot_dispersion(sweep, "up (30% responders)")
+gradient_table(sweep, "up (30% responders)")
+```
+
+Point estimate with its likelihood-based standard error:
+
+```{r mixed-up-invariance-se, fig.height = 3.2}
+plot_se_calibration(sweep, "up (30% responders)")
+se_calibration(sweep, "up (30% responders)")
+```
+
+### DOWN, 30% responders
+
+```{r mixed-down-cell}
+set.seed(1)
+plot_peak_samples(direction = "down", rank_cap = 5000, responder_fraction = 0.3)
+```
+
+```{r mixed-down-invariance, fig.height = 5}
+plot_invariance(sweep, "down (30% responders)")
+plot_dispersion(sweep, "down (30% responders)")
+gradient_table(sweep, "down (30% responders)")
+```
+
+Point estimate with its likelihood-based standard error:
+
+```{r mixed-down-invariance-se, fig.height = 3.2}
+plot_se_calibration(sweep, "down (30% responders)")
+se_calibration(sweep, "down (30% responders)")
+```
+
+# What the MLE assumes, and when that matters
+
+The fit treats the signature's ranks as independent draws from `f(x) ~ exp(theta * x)`.
+That is three assumptions: a specific family, a **monotone** density (stronger than
+unimodal -- the mode is always at rank 1 or rank `G`, so an interior mode cannot be
+represented at all), and independence, when real ranks are a permutation subset and
+therefore mildly negatively dependent.
+
+## The score is a moment matcher, not a shape claim
+
+The tilt is an exponential family whose sufficient statistic is `x` itself, so its
+score equation is `sum(x_i) = k * mu(theta)`. With nothing censored the fitted mean
+is *identically* the sample mean, whatever the true shape:
+
+```{r assumption-uncensored}
+uncensored <- do.call(rbind, lapply(names(awkward_shapes), function(nm) {
+  set.seed(31)
+  peaks <- awkward_shapes[[nm]]()
+  data.frame(
+    shape = nm,
+    mle_at_cap_0 = score_variants(peaks, 0L)[["mle"]],
+    plain_mean_rank = mean((peaks - 0.5) / gene_size)
+  )
+}))
+uncensored$difference <- uncensored$mle_at_cap_0 - uncensored$plain_mean_rank
+uncensored
+```
+
+So `theta` is not a claim about the shape of the rank distribution. It is a device
+for extrapolating the mean rank into the region you cannot see, and the family only
+supplies a guess for the mean of the censored mass.
+
+## The imputation is exact, not an analogy
+
+Differentiating `log F(c; theta)` gives `E[x | x <= c] - mu(theta)`, so setting the
+derivative to zero rearranges to
+
+$$ \mu(\hat\theta) \;=\; \frac{\sum_{\text{detected}} x_i \;+\; m \cdot E[x \mid x \le c;\, \hat\theta]}{S} $$
+
+the observed sum plus the censored count times the censored mean, over the full
+signature size. The MLE's only contribution is supplying that conditional mean
+self-consistently: the fitted `theta` sets the imputed value, and the imputed value
+sets the fitted `theta`. It is the fixed point of the obvious EM loop.
+
+`auc` has the same structure but plugs in `cap / 2`, the answer you get if the
+hidden genes are spread uniformly below the cap. The two therefore agree for a flat
+signature and diverge in proportion to how directional it is:
+
+```{r assumption-imputation}
+set.seed(1)
+imputation <- do.call(rbind, lapply(c("up", "down", "flat"), function(direction) {
+  peaks <- simulate_peaks(direction = direction)
+  do.call(rbind, lapply(c(3000L, 5000L, 7000L), function(cap) {
+    scored <- score_variants(peaks, cap)
+    data.frame(
+      direction, cap,
+      mle_imputes = tilt$cond_mean(cap / gene_size, scored[["mle_theta"]]),
+      auc_imputes = cap / gene_size / 2
+    )
+  }))
+}))
+imputation$gap <- imputation$mle_imputes - imputation$auc_imputes
+imputation
+```
+
+That is also why `auc` climbed for DOWN signatures earlier. It kept imputing
+`cap / 2` where the honest conditional mean was far lower, and the size of that
+error grew with the cap.
+
+## Clustered signatures: where monotonicity actually bites
+
+These are the shapes being tested. None of them can be represented by a monotone
+tilt: the mass sits in a band in the middle, or at both ends at once.
+
+```{r assumption-shapes, fig.height = 3.6}
+plot_awkward_shape("band 5000-7000", rank_cap = 1000)
+plot_awkward_shape("narrow block at 6000", rank_cap = 1000)
+plot_awkward_shape("two clusters, 2k and 9k", rank_cap = 1000)
+```
+
+Note the scores in those panels. The cap sits below every cluster, so all 1000
+genes are detected and the `mle` is already exactly right -- 0.601, 0.600 and
+0.550 against true means of 0.601, 0.600 and 0.550 -- despite the shape being
+entirely wrong for the model. Nothing is censored, so the fit is pure moment
+matching and the family never gets consulted.
+
+Now move the cap into the cluster. Same signature, same everything, only the cap
+has changed:
+
+```{r assumption-shapes-censored, fig.height = 3.6}
+plot_awkward_shape("band 5000-7000", rank_cap = 6500)
+plot_awkward_shape("narrow block at 6000", rank_cap = 6500)
+plot_awkward_shape("two clusters, 2k and 9k", rank_cap = 8000)
+```
+
+The band at 5000-7000 drops from 0.601 to 0.371, and the narrow block collapses
+from 0.600 to 0.017 once its 1000 genes fall below the cap in one go. In both
+cases the model imputes the hidden genes as though the density kept falling toward
+0, when really they sit immediately under the cap. The two-cluster case moves the
+other way, 0.550 to 0.725, because censoring removes its lower lobe and leaves the
+upper one: same mechanism as the partial-responder scenarios, since a two-cluster
+signature *is* a mixture of an UP and a DOWN population.
+
+The full sweep, with the diagnostics:
+
+```{r assumption-clusters}
+clusters <- do.call(rbind, lapply(names(awkward_shapes), function(nm) {
+  cbind(shape = nm, shape_table(nm, caps = c(3000L, 5000L, 6500L, 8000L)))
+}))
+clusters
+```
+
+Two things to read off. First, `bias` stays at machine zero until `detected` starts
+falling, then grows fast, exactly as the pairs of figures above show.
+
+Second, and importantly, **`se` does not react**. A standard error measures sampling
+noise *under the assumed model* and is structurally blind to the model being wrong.
+Everything said earlier about the SE flagging trouble applies to running out of
+data, not to misspecification.
+
+## Two diagnostics that do react
+
+`ks` is the largest gap between the detected ranks and the fitted tilt, compared
+against a 5% critical value near `1.36 / sqrt(k)`, about 0.043 at 1000 genes. Read
+it as a magnitude rather than a verdict. The monotone signature sits just above the
+line at 0.05-0.07, because `Beta(5, 1)` is not literally an exponential tilt either
+-- only mildly misspecified. The banded and two-cluster signatures land at 0.31 to
+0.82, an order of magnitude further out, which is the regime where the imputation
+cannot be trusted.
+
+`bound` needs no assumption about shape at all. Both the score and the truth have
+the form `(sum_detected + m * E) / S` and differ only in `E`, which must lie in
+`[0, cap]`. So the error cannot exceed the censored fraction times the cap:
+
+```{r assumption-bound}
+binding <- clusters[clusters$bound > 0, ]
+data.frame(
+  cases = nrow(clusters),
+  bound_holds = sum(abs(clusters$bias) <= clusters$bound + 1e-8),
+  # Rows with no censoring have a bound of exactly 0, so the ratio is only
+  # meaningful where the bound actually binds.
+  worst_ratio_where_censored = max(abs(binding$bias) / binding$bound)
+)
+```
+
+That gives the operating rule. When `bias_bound` is small the score is trustworthy
+whatever the true shape; when it is large the answer rests entirely on the shape
+assumption, and `ks` tells you whether that assumption is holding.
+
+## Independence
+
+Ranks are drawn without replacement, so the i.i.d. likelihood slightly overstates
+the spread. The finite-population correction is `sqrt(1 - S/G)`, about 0.95 here, so
+the effect is a few percent in the conservative direction. It is part of why the
+observed `se_over_sd` ratios above sit a little over 1 rather than under, and it is
+not worth correcting.
