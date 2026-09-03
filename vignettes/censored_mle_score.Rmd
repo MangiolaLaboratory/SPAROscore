@@ -1,0 +1,304 @@
+---
+title: "SPAROscore: The Censored MLE Score"
+package: "SPAROscore"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{SPAROscore: The Censored MLE Score}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 8,
+  fig.height = 4
+)
+options(width = 120)
+library(ggplot2)
+```
+
+# The rationale
+
+Rank-based gene-set scoring is non-parametric: it makes no assumption about the distribution of the expression values themselves, which is what makes it robust. It remains vulnerable, however, to sparsity in the data. When a large proportion of genes share the same expression value (0, 1, or any transformed count), those genes carry very little information about relative expression. In terms of ranking, they are ties.
+
+`AUCell` and `UCell` address this with a rank cap, which discards the low-information, tie-rich end of the ranking.
+
+`SPAROscore` improves single-sample gene-set scoring by allowing that rank cap to vary with the sparsity of each observation (cell, sample, or pixel), rather than fixing it globally.
+
+The objective is to use as much of the signature as possible (as many gene-set genes as possible) without capturing the noisy region close to zero counts. A one-size-fits-all cap, say 1500 genes, may be well calibrated for one regime, but it does not adapt to diverse technologies, diverse aggregation resolutions (pseudobulk and metacells), or cell phenotypes whose sparsity varies within a sample (large cancer cells against smaller healthy cells).
+
+# The problem
+
+The difficulty introduced by an adaptive cap is that the sum of ranks becomes linked to sparsity through the cap itself. To obtain an unbiased score, which scores the same cell consistently irrespective of its library size, we have to compensate for the choice of cap. Concretely: if we discard half of a cell's RNA content at random, we should recover the signature score of the complete cell, up to random error.
+
+# The model
+
+Because the cap depends on sparsity, we simplify the model by setting sparsity aside. We assume full information and infinite resolution (library size $\gg 0$) and impose an arbitrary rank cap directly. Sparsity may create further problems beyond this capping bias, which we approach separately.
+
+Throughout, ranks are normalised to the unit interval: $r_g \in [0, 1]$ is the position of gene $g$ in the ranking of a given cell, with 1 the highest expression. The signature is the gene set of size $G$, and the cap sits at $c \in (0, 1)$.
+
+## Censoring
+
+The job of the rank cap is to ignore all the signature genes on its left, because in real data they are noisy, effectively censoring them. That is, they exist and would have informative values if we had infinite resolution, but in practice they are tie-rich, often sharing the same value.
+
+Our score is therefore made of two parts, the ranks we can see and the ranks the cap hides.
+
+$$
+\left(\sum_{g_{observed}} r_g\right) + \left(G_{censored} \cdot r_{unknown}\right)
+$$
+
+If the genes in the gene sets were placed at random in the gene list, the $r_{unknown}$ would be the average position between 0 and the rank cap $c$.
+
+$$
+\left(\sum_{g_{observed}} r_g\right) + \left(G_{censored} \cdot \frac{c-0}{2}\right)
+$$
+
+We know that this is often not the case. If the gene-set signature is highly expressed, and we assume smoothness, most of its genes pile up towards 1 and occur less and less often towards 0. Consequently a censored gene is more likely to sit near position $c$ than near position 0. Let us refer to this unknown censored sum of ranks as $S_{high}$. If a signature is lowly expressed we observe the opposite, with most signature genes closer to 0 than to $c$; call that unknown censored sum of ranks $S_{low}$. We can then assume $S_{high} > S_{low}$.
+
+To summarise: the distribution of the censored rank sum depends on the ranks we do observe. Knowing the observed rank sum tells us something about the censored rank sum, which is better than assuming complete randomness in the censored range.
+
+## Rank distribution
+
+In order to model censoring, and to transfer information from the uncensored to the censored part, it is helpful to assume that the signature genes are placed within the rank range $[0, 1]$ following a simple exponential density.
+
+$$
+f(r | \theta) = \frac{e^{\theta r}}{A_{0:1}(\theta)},
+\qquad
+A_{0:1}(\theta) = \int_0^1 e^{\theta r} \, dr = \frac{e^{\theta} - 1}{\theta}
+$$
+
+Here $\theta$ is the only parameter governing the tilt, and $r$ is the rank (normalised; e.g. 0.6). The constant $A_{0:1}(\theta)$ is the area under $e^{\theta r}$ between 0 and 1, and its role is simply to make the density integrate to one. We write $A$ for area, with the subscript giving the range it covers, so $A_{0:1}(\theta)$ is the area from 0 to 1 and $A_{0:c}(\theta)$, which we need shortly, is the area from 0 to the cap. (In the statistics literature such a normalising constant is usually written $Z$.) When $\theta$ is positive the function increases towards the right, when it is 0 it is flat, and when it is negative it decreases.
+
+In practice, the distribution of a gene set within the rank range is often smooth, unimodal, and often monotonic. The exponential function is therefore both simple and adequate.
+
+It is easy to see that $\theta$, being $\gg 0$ for highly expressed signatures and $\ll 0$ for lowly expressed ones, can represent our score. Since $\theta$ itself is unbounded, `sparoscore_mle()` reports the mean rank implied by $\theta$, a monotone transformation of it that lies on the unit interval and is neutral at 0.5.
+
+# Estimating $\theta$
+
+We can assume a gene-set signature of size 5, composed of the genes i, j, o, z, w, and no censoring.
+
+```{r mle-picture-helper, include = FALSE}
+# One reusable picture of the unnormalised curve exp(theta * x). It is built
+# piece by piece across the next sections: the curve and its total area, the
+# rank cap, and then each side in turn. Ticks under the axis stand for
+# individual signature genes.
+demo_theta <- 1.8
+demo_cap <- 0.4
+
+demo_genes_det <- c(0.55, 0.71, 0.88)  # i, j, o (to the right of the cap)
+demo_genes_cens <- c(0.10, 0.25)       # z, w (to the left of the cap)
+demo_genes <- c(demo_genes_cens, demo_genes_det)
+
+demo_top <- exp(demo_theta)
+tick_lo <- -demo_top * 0.10
+tick_hi <- -demo_top * 0.03
+lab_y <- -demo_top * 0.21
+
+area_01 <- (exp(demo_theta) - 1) / demo_theta
+area_0c <- (exp(demo_theta * demo_cap) - 1) / demo_theta
+
+tilt_picture <- function(cap = NA_real_, shade = character(0), genes = demo_genes,
+                         left_style = "show", theta = demo_theta, title = "") {
+  grid <- seq(0, 1, length.out = 400)
+  curve <- data.frame(x = grid, y = exp(theta * grid))
+
+  p <- ggplot(curve, aes(x, y))
+  if ("all" %in% shade) {
+    p <- p + geom_area(fill = "#4C97CB", alpha = 0.30)
+  }
+  if ("left" %in% shade) {
+    p <- p + geom_area(data = curve[curve$x <= cap, ], fill = "#C0392B", alpha = 0.30)
+  }
+  if ("right" %in% shade) {
+    p <- p + geom_area(data = curve[curve$x >= cap, ], fill = "#1E8449", alpha = 0.30)
+  }
+
+  p <- p + geom_line(linewidth = 0.9, colour = "grey25")
+  if (!is.na(cap)) {
+    p <- p + geom_vline(xintercept = cap, colour = "red", linewidth = 0.9)
+  }
+
+  if (length(genes)) {
+    g <- data.frame(
+      x = genes,
+      side = if (is.na(cap)) "none" else ifelse(genes > cap, "detected", "censored")
+    )
+    g <- g[g$side != "censored" | left_style != "hide", ]
+
+    g$shade <- if (is.na(cap)) {
+      "grey25"
+    } else {
+      ifelse(g$side == "detected", "#1E8449",
+             if (left_style == "ghost") "grey50" else "#C0392B")
+    }
+
+    p <- p + geom_segment(
+      data = g,
+      aes(x = x, xend = x, y = tick_lo, yend = tick_hi, colour = shade),
+      linewidth = 0.6,
+      inherit.aes = FALSE
+    ) + scale_colour_identity()
+  }
+
+  p +
+    scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) +
+    labs(
+      x = "position in the ranking (0 = bottom, 1 = top)",
+      y = "exp(theta * x)",
+      title = title
+    ) +
+    theme_minimal() +
+    theme(panel.grid.minor = element_blank())
+}
+```
+
+## 1. Likelihood of $\theta$
+
+To estimate $\theta$ given our data, we can use a maximum likelihood estimator (MLE). Treating the five ranks as independent draws from $f(r | \theta)$, the likelihood of theta given the data is
+
+```{r mle-vig-picture-1, fig.height=2.8, echo=FALSE}
+tilt_picture(
+  shade = "all"
+) +
+  annotate(
+    "text",
+    x = 0.45,
+    y = exp(demo_theta * 0.45) * 0.40,
+    parse = TRUE,
+    size = 5,
+    colour = "#1B4F72",
+    label = sprintf("A['0:1'] == %.3f", area_01)
+  )
+```
+
+$$
+L(\theta | i, j, o, z, w) = \prod_{i, j, o, z, w} \frac{e^{\theta r_g}}{A_{0:1}(\theta)}
+$$
+
+where $A_{0:1}(\theta)$ is the fixed normalising constant introduced above: it depends on $\theta$ alone, not on the data.
+
+## 2. Log-likelihood of $\theta$
+
+We usually perform parameter estimation in the log-likelihood space, where the product becomes a sum. The log-likelihood of $\theta$ is
+
+$$
+l(\theta | i, j, o, z, w) = \sum_{i, j, o, z, w} \left(\theta r_g - log\left(A_{0:1}(\theta)\right)\right)
+$$
+
+The second term does not depend on the gene, so summing it over five genes simply multiplies it by 5:
+
+$$
+l(\theta | i, j, o, z, w) = \sum_{i, j, o, z, w} \left(\theta r_g\right) - 5 \, log\left(A_{0:1}(\theta)\right)
+$$
+
+and since $\theta$ is a single value multiplying every $r_g$, it factors out of the sum:
+
+$$
+l(\theta | i, j, o, z, w) = \theta \sum_{i, j, o, z, w} \left(r_g\right) - 5 \, log\left(A_{0:1}(\theta)\right)
+$$
+
+The data now enter only through the rank sum $\sum_{i, j, o, z, w} \left(r_g\right)$.
+
+## 3. Introducing rank cap without censoring
+
+As an intermediate step, we introduce a rank cap $c$ (e.g., at 0.5) while retaining full information and full resolution. Our goal is to recover the same $\theta$ (the same score). We can assume that the 3 genes i, j, o are on the right of the rank cap $c$, and the 2 genes z, w are on the left.
+
+This case is trivial, and it is enough to split our log likelihood across our 3 and 2 gene groups and sum it.
+
+```{r mle-vig-picture-3, fig.height=2.9, echo=FALSE}
+k <- length(demo_genes_det)
+m <- length(demo_genes_cens)
+tilt_picture(
+  cap = demo_cap,
+  shade = "all"
+) +
+  annotate(
+    "text",
+    x = 0.62,
+    y = exp(demo_theta * 0.62) * 0.40,
+    parse = TRUE,
+    size = 5,
+    colour = "#1B4F72",
+    label = sprintf("A['0:1'] == %.3f", area_01)
+  ) +
+  annotate(
+    "text",
+    x = 0.20,
+    y = lab_y,
+    label = sprintf("m == %d", m),
+    colour = "#C0392B",
+    size = 4,
+    parse = TRUE
+  ) +
+  annotate(
+    "text",
+    x = 0.70,
+    y = lab_y,
+    label = sprintf("k == %d", k),
+    colour = "#1E8449",
+    size = 4,
+    parse = TRUE
+  )
+```
+
+$$
+l(\theta | i, j, o, z, w) = \left(\theta \sum_{i, j, o} \left(r_g\right) - 3 \, log\left(A_{0:1}(\theta)\right)\right) + \left(\theta \sum_{z, w} \left(r_g\right) - 2 \, log\left(A_{0:1}(\theta)\right)\right)
+$$
+
+which simplified becomes
+
+$$
+l(\theta | i, j, o, z, w) = \theta \sum_{i, j, o} \left(r_g\right) + \theta \sum_{z, w} \left(r_g\right) - 5 \, log\left(A_{0:1}(\theta)\right)
+$$
+
+## 4. Censoring
+
+Now let us introduce censoring to the left of our rank cap $c$. The unnormalised term $\theta \sum_{z, w} \left(r_g\right)$ cannot be calculated anymore, as we don't know what the rank of genes z and w is. The most we can say about **any** censored gene is that it falls somewhere between 0 and $c$, an event whose probability under the model is the corresponding fraction of the area:
+
+```{r mle-vig-picture-4a, fig.height=2.9, echo=FALSE}
+tilt_picture(
+  cap = demo_cap,
+  shade = "left",
+  left_style = "hide"
+) +
+  annotate(
+    "text",
+    x = 0.19,
+    y = exp(demo_theta * 0.19) * 0.42,
+    parse = TRUE,
+    size = 5,
+    colour = "#C0392B",
+    label = sprintf("A['0:c'] == %.3f", area_0c)
+  )
+```
+
+$$
+P(r \le c | \theta) = \frac{A_{0:c}(\theta)}{A_{0:1}(\theta)},
+\qquad
+A_{0:c}(\theta) = \int_0^c e^{\theta r} \, dr = \frac{e^{\theta c} - 1}{\theta}
+$$
+
+Note what has happened: the individual position has dropped out, so every censored gene makes the same contribution whatever its true rank. We are calculating the log likelihood, so each contributes $log\left(A_{0:c}(\theta)\right)$, and as we were summing over the 2 genes z and w, this is taken twice.
+
+Substituting these contributions for z and w, the likelihood now becomes
+
+$$
+l(\theta | i, j, o, z, w) = \theta \sum_{i, j, o} \left(r_g\right) + 2 \, log\left(A_{0:c}(\theta)\right) - 5 \, log\left(A_{0:1}(\theta)\right)
+$$
+
+
+## 5. Parameters for the optimiser
+
+From the equation, we can appreciate that, for estimating $l(\theta | i, j, o, z, w)$, we need 4 pieces of information
+
+- The rank sum of the non censored genes: $\sum_{i, j, o} \left(r_g\right)$
+- The rank cap $c$: here 0.5
+- Signature size $G$: here 5
+- Censored signature size $G_{censored}$: here 2
+
+The number of detected genes follows as $G - G_{censored}$, so nothing further is needed. In particular, the individual positions of the censored genes never appear.
+
+The likelihood is 1-dimensional, and $l(\theta)$ is concave in $\theta$: it has a single maximum. There is no closed form for the maximising $\theta$, so it is found numerically. `sparoscore_mle()` solves the score equation $l'(\theta) = 0$ with `stats::uniroot()`, taking advantage of the fact that a concave $l$ has a strictly decreasing derivative and therefore a single sign change.
