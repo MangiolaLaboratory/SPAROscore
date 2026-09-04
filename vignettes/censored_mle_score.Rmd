@@ -56,7 +56,235 @@ $$
 \left(\sum_{g_{observed}} r_g\right) + \left(G_{censored} \cdot \frac{c-0}{2}\right)
 $$
 
-We know that this is often not the case. If the gene-set signature is highly expressed, and we assume smoothness, most of its genes pile up towards 1 and occur less and less often towards 0. Consequently a censored gene is more likely to sit near position $c$ than near position 0. Let us refer to this unknown censored sum of ranks as $S_{high}$. If a signature is lowly expressed we observe the opposite, with most signature genes closer to 0 than to $c$; call that unknown censored sum of ranks $S_{low}$. We can then assume $S_{high} > S_{low}$.
+```{r censor-expect-helper, include = FALSE}
+# Density of a signature drawn from a flat, UP, or DOWN ranking, with the
+# individual genes as a barcode of ticks below the axis. The cap sits at c and
+# the dashed line marks where a censored gene is expected to be.
+expect_cap <- 0.5
+
+# Inverse CDF of the tilt on [0, 1], so the ticks are a real sample from the
+# same density that is drawn above them.
+draw_tilt_ranks <- function(n, theta, seed) {
+  set.seed(seed)
+  u <- sort(stats::runif(n))
+  if (abs(theta) < 1e-8) u else log1p(u * expm1(theta)) / theta
+}
+
+censored_mean <- function(cap, theta) {
+  if (abs(theta) < 1e-8) {
+    cap / 2
+  } else {
+    cap / (1 - exp(-theta * cap)) - 1 / theta
+  }
+}
+
+tilt_area <- function(theta) {
+  if (abs(theta) < 1e-8) 1 else (exp(theta) - 1) / theta
+}
+
+# Spread of a single hidden gene about its expectation. Truncating the tilt to
+# [0, c] gives back a tilt on [0, 1] with parameter theta * c, rescaled by c,
+# so the variance below is that of the unit tilt.
+censored_sd <- function(cap, theta) {
+  lambda <- theta * cap
+  v <- if (abs(lambda) < 1e-8) {
+    1 / 12
+  } else {
+    1 / lambda^2 - exp(lambda) / (exp(lambda) - 1)^2
+  }
+  cap * sqrt(v)
+}
+
+# Share of the signature that falls below the cap.
+censored_fraction <- function(cap, theta) {
+  if (abs(theta) < 1e-8) cap else expm1(theta * cap) / expm1(theta)
+}
+
+# How far the unknown block can move the score: the spread of one hidden gene,
+# weighted by how much of the signature is hidden. The per-gene spread alone is
+# symmetric in theta, so it is the censored fraction that makes DOWN the least
+# certain case and UP the most certain.
+score_leverage <- function(cap, theta) {
+  censored_fraction(cap, theta) * censored_sd(cap, theta)
+}
+
+# Every panel is drawn on one shared vertical scale, set by the most peaked
+# density in the set. Letting each panel autoscale would put the uniform
+# density at its own maximum, filling the panel and making the flat case look
+# like a different kind of figure from the tilted ones.
+expect_theta <- c(0, 4.5, -4.5)
+expect_top <- max(vapply(
+  expect_theta,
+  function(th) max(exp(th * seq(0, 1, length.out = 400)) / tilt_area(th)),
+  numeric(1)
+))
+
+expect_picture <- function(theta, cap = expect_cap, n = 70, seed = 1,
+                           hide_censored = FALSE, y_top = expect_top) {
+  xs <- seq(0, 1, length.out = 400)
+  dens_df <- data.frame(x = xs, y = exp(theta * xs) / tilt_area(theta))
+  top <- y_top
+
+  ranks <- draw_tilt_ranks(n, theta, seed)
+  bar_df <- data.frame(
+    x = ranks,
+    colour = ifelse(ranks > cap, "#1E8449", "#C0392B")
+  )
+  # The realistic view: genes below the cap leave no trace at all.
+  if (hide_censored) bar_df <- bar_df[bar_df$x > cap, ]
+
+  mu <- censored_mean(cap, theta)
+  tick_lo <- -top * 0.20
+  tick_hi <- -top * 0.06
+  label_hjust <- if (mu < 0.2) 0 else if (mu > 0.8) 1 else 0.5
+
+  p <- ggplot(dens_df, aes(x, y)) +
+    geom_area(data = dens_df[dens_df$x <= cap, ], fill = "#C0392B",
+              alpha = 0.30) +
+    geom_line(colour = "grey25", linewidth = 0.9)
+
+  if (hide_censored) {
+    half <- score_leverage(cap, theta)
+
+    p <- p +
+      annotate(
+        "rect",
+        xmin = 0, xmax = cap,
+        ymin = tick_lo * 1.55, ymax = top * 1.28,
+        fill = "grey45", alpha = 0.08
+      ) +
+      # Uncertainty around the expectation, drawn to the same height as the
+      # dashed line so the barcode row stays clear.
+      annotate(
+        "rect",
+        xmin = max(0, mu - half), xmax = min(cap, mu + half),
+        ymin = tick_lo, ymax = top * 1.02,
+        fill = "#C0392B", alpha = 0.18
+      ) +
+      annotate(
+        "text",
+        # Sit in whichever half of the censored band is further from the
+        # expectation line, so the label never fouls the arrow or the dashes.
+        x = if (mu < cap / 2) cap * 0.72 else cap * 0.28,
+        y = top * 0.85,
+        label = "Unseen",
+        colour = "#7B241C", size = 5.5, fontface = "bold"
+      ) +
+      # The detected genes are what pin down the tilt, and the tilt is what
+      # places the expectation. The arc carries that inference leftwards.
+      annotate(
+        "curve",
+        x = 0.80, xend = mu + 0.012,
+        y = top * 0.30, yend = top * 0.30,
+        curvature = 0.32,
+        linewidth = 0.6,
+        colour = "#1B4F72",
+        arrow = grid::arrow(length = grid::unit(0.20, "cm"), type = "closed")
+      )
+  }
+
+  p <- p +
+    geom_vline(xintercept = cap, colour = "red", linewidth = 0.9) +
+    annotate(
+      "segment",
+      x = mu, xend = mu, y = tick_lo, yend = top * 1.02,
+      colour = "#C0392B", linetype = "dashed", linewidth = 0.7
+    ) +
+    geom_segment(
+      data = bar_df,
+      aes(x = x, xend = x, y = tick_lo, yend = tick_hi, colour = colour),
+      linewidth = 0.5,
+      inherit.aes = FALSE
+    ) +
+    scale_colour_identity() +
+    annotate(
+      "text",
+      x = mu,
+      y = top * 1.13,
+      label = sprintf("E[r | r <= c] = %.2f", mu),
+      colour = "#C0392B",
+      hjust = label_hjust,
+      size = 3.4
+    ) +
+    annotate(
+      "text",
+      x = cap,
+      y = tick_lo * 1.35,
+      label = "cap c",
+      colour = "red",
+      hjust = -0.15,
+      size = 3.2
+    ) +
+    scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) +
+    coord_cartesian(ylim = c(tick_lo * 1.55, top * 1.28), clip = "off") +
+    labs(
+      x = "position in the ranking (0 = bottom, 1 = top)",
+      y = "density"
+    ) +
+    theme_minimal() +
+    theme(panel.grid.minor = element_blank())
+
+  p
+}
+```
+
+```{r censor-expect-flat, fig.height = 3.4, echo = FALSE}
+expect_picture(
+  theta = 0,
+  seed = 1
+)
+```
+
+What we would guess if all left data was censored.
+
+
+```{r censor-expect-flat-unseen, fig.height = 3.4, echo = FALSE}
+expect_picture(
+  theta = 0,
+  seed = 1,
+  hide_censored = TRUE
+)
+```
+
+
+We know that this is often not the case. If the gene-set signature is highly expressed, and we assume smoothness, most of its genes pile up towards 1 and occur less and less often towards 0. Consequently a censored gene is more likely to sit near position $c$ than near position 0. Let us refer to this unknown censored sum of ranks as $S_{high}$. 
+
+```{r censor-expect-up, fig.height = 3.4, echo = FALSE}
+expect_picture(
+  theta = 4.5,
+  seed = 2
+)
+```
+
+What we would guess if all left data was censored.
+
+```{r censor-expect-up-unseen, fig.height = 3.4, echo = FALSE}
+expect_picture(
+  theta = 4.5,
+  seed = 2,
+  hide_censored = TRUE
+)
+```
+
+If a signature is lowly expressed we observe the opposite, with most signature genes closer to 0 than to $c$; call that unknown censored sum of ranks $S_{low}$. We can then assume $S_{high} > S_{low}$.
+
+```{r censor-expect-down, fig.height = 3.4, echo = FALSE}
+expect_picture(
+  theta = -4.5,
+  seed = 3
+)
+```
+
+What we would guess if all left data was censored.
+
+
+```{r censor-expect-down-unseen, fig.height = 3.4, echo = FALSE}
+expect_picture(
+  theta = -4.5,
+  seed = 3,
+  hide_censored = TRUE
+)
+```
 
 To summarise: the distribution of the censored rank sum depends on the ranks we do observe. Knowing the observed rank sum tells us something about the censored rank sum, which is better than assuming complete randomness in the censored range.
 
@@ -101,7 +329,7 @@ area_01 <- (exp(demo_theta) - 1) / demo_theta
 area_0c <- (exp(demo_theta * demo_cap) - 1) / demo_theta
 
 tilt_picture <- function(cap = NA_real_, shade = character(0), genes = demo_genes,
-                         left_style = "show", theta = demo_theta, title = "") {
+                         left_style = "show", theta = demo_theta) {
   grid <- seq(0, 1, length.out = 400)
   curve <- data.frame(x = grid, y = exp(theta * grid))
 
@@ -147,8 +375,7 @@ tilt_picture <- function(cap = NA_real_, shade = character(0), genes = demo_gene
     scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) +
     labs(
       x = "position in the ranking (0 = bottom, 1 = top)",
-      y = "exp(theta * x)",
-      title = title
+      y = "exp(theta * x)"
     ) +
     theme_minimal() +
     theme(panel.grid.minor = element_blank())
