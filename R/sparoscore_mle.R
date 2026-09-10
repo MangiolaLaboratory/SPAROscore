@@ -24,9 +24,14 @@
 
 # Mean position implied by theta, which is the reported score. This is
 # d/dtheta log Z_{0:1}(theta), pre-solved so nothing is integrated at runtime.
+#
+# The closed form e^theta/(e^theta - 1) - 1/theta is 0/0 at theta = 0, and in
+# double precision the two large terms cancel badly for |theta| below about
+# 1e-4. The Bernoulli series is the finite limit of that removable singularity.
 .tilt_mean <- function(theta) {
-    if (abs(theta) < 1e-8) {
-        0.5 + theta / 12
+    if (abs(theta) < 1e-4) {
+        theta2 <- theta * theta
+        0.5 + theta * (1 / 12 - theta2 / 720)
     } else {
         1 / (1 - exp(-theta)) - 1 / theta
     }
@@ -54,12 +59,14 @@
 
 # E[x | x <= q], the position the fit implies for every censored gene. Equal to
 # q * .tilt_mean(theta * q), because truncating the tilt to [0, q] gives back a
-# tilt on [0, 1] with parameter theta * q.
+# tilt on [0, 1] with parameter theta * q. The same 0/0 lives in this closed
+# form, now at theta * q = 0 rather than at theta = 0.
 .tilt_cond_mean <- function(q, theta) {
-    if (abs(theta) < 1e-8) {
-        q / 2
+    lambda <- theta * q
+    if (abs(lambda) < 1e-4) {
+        q * (0.5 + lambda * (1 / 12 - lambda * lambda / 720))
     } else {
-        q / (1 - exp(-theta * q)) - 1 / theta
+        q / (1 - exp(-lambda)) - 1 / theta
     }
 }
 
@@ -124,7 +131,13 @@
               censored_term)
     }
 
-    # Derivative of the log-likelihood: observed positions plus the imputed
+    # Derivative of the log-likelihood, written as a moment condition so that
+    # it stays finite at theta = 0. Expanding the areas in A_{0:c} and A_{0:1}
+    # produces
+    #   R + Q * c * e^{c theta}/(e^{c theta} - 1) - G * e^theta/(e^theta - 1)
+    #     + P / theta
+    # whose last three terms are each 0/0 at the uniform. Those 1/theta poles
+    # cancel, and what remains is this: observed ranks plus the imputed
     # censored mass, against the mean the candidate theta implies.
     score_equation <- function(theta) {
         censored_mass <- if (censored_size > 0L) {
