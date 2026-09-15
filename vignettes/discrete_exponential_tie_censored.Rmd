@@ -1,0 +1,397 @@
+---
+title: "Discretised Tie-Censored exponential"
+package: "SPAROscore"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Discretised Tie-Censored exponential}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 8,
+  fig.height = 4
+)
+options(width = 120)
+library(ggplot2)
+```
+
+# The rationale
+
+Rank-based gene-set scoring is non-parametric: it makes no assumption about the
+distribution of the expression values themselves, which is what makes it robust.
+It remains vulnerable, however, to sparsity in the data. When a large proportion
+of genes share the same expression value (0, 1, or any transformed count), those
+genes carry very little information about relative expression. In terms of
+ranking, they are ties.
+
+`AUCell` and `UCell` address this with a rank cap, which discards the
+low-information, tie-rich end of the ranking.
+
+The objective here is to include
+ties and use as much of the signature as possible. A tie is an interval in the
+ranking: every gene with the same count is treated as in a censored interval, so
+introducing the concept of uncertainty of low ranks.
+
+
+```{r picture-helpers, include = FALSE}
+demo_theta <- 0.15
+demo_G <- 12L
+demo_lo <- 1L
+demo_hi <- 6L
+demo_m <- demo_hi - demo_lo + 1L
+demo_mid <- (demo_lo + demo_hi) / 2
+
+# Continuous positions on [0, G], then the same genes on the integer slots.
+demo_cont <- c(z = 1.4, w = 4.4, o = 8.6, j = 9.7, i = 10.9)
+demo_disc_exact <- c(o = 9L, j = 10L, i = 11L)
+demo_disc_tied  <- c(z = 3L, w = 4L)
+
+demo_top <- exp(demo_theta * demo_G)
+tick_lo <- -demo_top * 0.10
+tick_hi <- -demo_top * 0.03
+lab_y <- -demo_top * 0.21
+area_0G <- (exp(demo_theta * demo_G) - 1) / demo_theta
+
+tilt_mass <- function(r, theta = demo_theta, G = demo_G) exp(theta * r)
+
+tilt_Z <- function(theta = demo_theta, G = demo_G) {
+  if (abs(theta) < 1e-10) {
+    G
+  } else {
+    exp(theta) * (1 - exp(theta * G)) / (1 - exp(theta))
+  }
+}
+
+area_Z <- tilt_Z()
+area_block <- sum(tilt_mass(demo_lo:demo_hi))
+
+# The gene universe by observed count: many genes share the lowest count, fewer
+# share the next one, and the top of the ranking resolves into single slots.
+# Occupancy sums to G, placing z, w in [1, 6] and o, j, i at 9, 10, 11.
+demo_counts <- 0:5
+demo_occ <- c(6L, 2L, 1L, 1L, 1L, 1L)
+demo_block_hi <- cumsum(demo_occ)
+demo_block_lo <- demo_block_hi - demo_occ + 1L
+demo_block_mid <- (demo_block_lo + demo_block_hi) / 2
+
+universe_picture <- function() {
+  df <- data.frame(
+    count = demo_counts,
+    m = demo_occ,
+    lo = demo_block_lo,
+    hi = demo_block_hi,
+    mid = demo_block_mid
+  )
+  df$y <- df$m * tilt_mass(df$mid)
+  df$fill <- ifelse(df$m > 1, "#C0392B", "#4C97CB")
+  df$label <- ifelse(df$m > 1, sprintf("m = %d", df$m), "")
+  curve <- data.frame(x = seq(1, demo_G, length.out = 400))
+  curve$y <- tilt_mass(curve$x)
+  top <- max(df$y)
+  tick_hi <- -top * 0.02
+  tick_lo <- -top * 0.08
+  brace_y <- -top * 0.22
+  cap <- top * 0.03
+  ties <- df[df$m > 1, ]
+  caps <- data.frame(
+    x = c(ties$lo - 0.4, ties$hi + 0.4),
+    y = brace_y - cap,
+    yend = brace_y + cap
+  )
+  # The five signature genes: o, j, i resolved, z and w inside the bottom tie.
+  genes <- data.frame(
+    x = c(unname(demo_disc_exact), unname(demo_disc_tied)),
+    label = c(names(demo_disc_exact), names(demo_disc_tied)),
+    colour = c(rep("#1E8449", length(demo_disc_exact)),
+               rep("#C0392B", length(demo_disc_tied)))
+  )
+
+  ggplot(df, aes(mid, y, fill = fill)) +
+    geom_col(width = 0.7, colour = NA, alpha = 0.55, show.legend = FALSE) +
+    geom_text(aes(label = label), vjust = -0.5, size = 3.2, colour = "#7B241C") +
+    geom_segment(
+      data = ties,
+      aes(x = lo - 0.4, xend = hi + 0.4, y = brace_y, yend = brace_y),
+      colour = "#C0392B", linewidth = 0.9, inherit.aes = FALSE
+    ) +
+    geom_segment(
+      data = caps,
+      aes(x = x, xend = x, y = y, yend = yend),
+      colour = "#C0392B", linewidth = 0.9, inherit.aes = FALSE
+    ) +
+    geom_segment(
+      data = genes,
+      aes(x = x, xend = x, y = tick_lo, yend = tick_hi, colour = colour),
+      linewidth = 0.7, inherit.aes = FALSE
+    ) +
+    geom_text(
+      data = genes,
+      aes(x = x, y = tick_lo, label = label, colour = colour),
+      vjust = 1.3, size = 3.1, fontface = "italic", inherit.aes = FALSE
+    ) +
+    scale_colour_identity() +
+    geom_line(data = curve, aes(x, y), inherit.aes = FALSE,
+              colour = "grey25", linewidth = 0.9) +
+    scale_fill_identity() +
+    scale_x_continuous(limits = c(0.4, demo_G + 0.6), expand = c(0, 0),
+                       breaks = c(demo_block_lo, demo_G)) +
+    coord_cartesian(ylim = c(brace_y * 1.3, max(df$y) * 1.15), clip = "off") +
+    labs(x = "rank (1 = lowest, G = highest)",
+         y = "m * exp(theta * r)") +
+    theme_minimal() +
+    theme(panel.grid.minor = element_blank())
+}
+
+cont_picture <- function(shade_all = TRUE, genes = unname(demo_cont)) {
+  grid <- seq(0, demo_G, length.out = 400)
+  curve <- data.frame(x = grid, y = tilt_mass(grid))
+  p <- ggplot(curve, aes(x, y))
+  if (shade_all) p <- p + geom_area(fill = "#4C97CB", alpha = 0.30)
+  p <- p + geom_line(linewidth = 0.9, colour = "grey25")
+  if (length(genes)) {
+    g <- data.frame(x = genes)
+    p <- p + geom_segment(
+      data = g,
+      aes(x = x, xend = x, y = tick_lo, yend = tick_hi),
+      colour = "grey25", linewidth = 0.6, inherit.aes = FALSE
+    )
+  }
+  p +
+    scale_x_continuous(limits = c(0, demo_G), expand = c(0, 0),
+                       breaks = c(0, demo_G / 2, demo_G)) +
+    labs(x = "rank (0 = lowest, G = highest)",
+         y = "exp(theta * r)") +
+    theme_minimal() +
+    theme(panel.grid.minor = element_blank())
+}
+
+disc_picture <- function(mode = c("sum"),
+                         genes_exact = unname(demo_disc_exact),
+                         show_tied_ticks = TRUE) {
+  mode <- match.arg(mode)
+  slots <- seq_len(demo_G)
+  mass <- tilt_mass(slots)
+  bars <- data.frame(x = slots, y = mass, fill = "#4C97CB")
+  if (mode == "sum") {
+    bars$fill <- ifelse(slots >= demo_lo & slots <= demo_hi, "#C0392B", "#4C97CB")
+  }
+  p <- ggplot(bars, aes(x, y, fill = fill)) +
+    geom_col(width = 1, colour = NA, alpha = 0.55, show.legend = FALSE)
+  p <- p +
+    geom_line(data = data.frame(x = slots, y = mass),
+              aes(x, y), inherit.aes = FALSE, colour = "grey25", linewidth = 0.9) +
+    scale_fill_identity()
+
+  g <- data.frame(
+    x = c(genes_exact, if (show_tied_ticks) unname(demo_disc_tied)),
+    colour = c(rep("#1E8449", length(genes_exact)),
+               if (show_tied_ticks) rep("#C0392B", length(demo_disc_tied)))
+  )
+  if (nrow(g)) {
+    disc_tick_lo <- -max(mass) * 0.12
+    disc_tick_hi <- -max(mass) * 0.03
+    p <- p + geom_segment(
+      data = g,
+      aes(x = x, xend = x, y = disc_tick_lo, yend = disc_tick_hi, colour = colour),
+      linewidth = 0.6, inherit.aes = FALSE
+    ) + scale_colour_identity()
+  }
+  p +
+    scale_x_continuous(limits = c(0.5, demo_G + 0.5), expand = c(0, 0),
+                       breaks = c(1, demo_lo, demo_hi, demo_G)) +
+    labs(x = "rank (1 = lowest, G = highest)",
+         y = "exp(theta * r)") +
+    theme_minimal() +
+    theme(panel.grid.minor = element_blank())
+}
+
+block_mean <- function(lo, hi, theta, G = demo_G) {
+  slots <- lo:hi
+  w <- tilt_mass(slots, theta, G)
+  sum(slots * w) / sum(w)
+}
+
+block_sd <- function(lo, hi, theta, G = demo_G) {
+  slots <- lo:hi
+  w <- tilt_mass(slots, theta, G)
+  p <- w / sum(w)
+  mu <- sum(slots * p)
+  sqrt(sum((slots - mu)^2 * p))
+}
+```
+
+# 1. The continuous (exponential) model
+
+We introduce the continuous model first. A cell's gene universe has size $G$.
+Ranks are a continuous position $r \in [0, G]$, with $G$ the highest
+expression. 
+
+$$
+f(r \mid \theta) = \frac{e^{\theta r}}{A_{0:G}(\theta)},
+\qquad
+A_{0:G}(\theta) = \int_0^G e^{\theta r}\, dr.
+$$
+
+$\theta$ is the only parameter. When it is positive the density increases
+towards $G$, when it is 0 the density is flat, and when it is negative it
+decreases towards 0. In practice a gene-set's placement in the ranking is often
+smooth, unimodal, and monotonic, so the exponential is both simple and
+adequate. $\theta \gg 0$ is a highly expressed signature and $\theta \ll 0$ a
+lowly expressed one, so $\theta$ is already a score. 
+
+Take a signature of five genes $i, j, o, z, w$, with no ties.
+
+```{r cont-picture, fig.height = 2.8, echo = FALSE}
+cont_picture() +
+  annotate(
+    "text",
+    x = 0.45 * demo_G,
+    y = tilt_mass(0.45 * demo_G) * 0.40,
+    parse = TRUE,
+    size = 5,
+    colour = "#1B4F72",
+    label = sprintf("A['0:G'] == %.3f", area_0G)
+  )
+```
+
+Treating the five ranks as independent draws from $f(r \mid \theta)$, the
+likelihood is
+
+$$
+L(\theta \mid i, j, o, z, w)
+  = \prod_{g \in \{i,j,o,z,w\}} \frac{e^{\theta r_g}}{A_{0:G}(\theta)}.
+$$
+
+In log space the product becomes a sum, and $A_{0:G}(\theta)$ factors out:
+
+$$
+\ell(\theta)
+  = \theta \sum_{g \in \{i,j,o,z,w\}} r_g - 5 \log A_{0:G}(\theta).
+$$
+
+## Why this is not enough
+
+A cell's ranking is a finite list of $G$ genes. Positions are the integer slots
+$1, \ldots, G$, and many genes share a count (e.g. zero expression), so many (in fact often the majority) share a slot range. The
+continuous density assumes each gene has a unique $r_g \in [0, G]$. The continuous model assumes that ties at zero effectively hold a lot of information,
+but in reality there is huge uncertainty associated with ties. That uncertainty would go away if we had infinite resolution (infinite library size), then the continuous model would be effectively adequate.
+
+# 2. Discretisation
+
+The same exponential is now evaluated at the integer slots $0, \ldots, G$, with
+0 the lowest expression. The discrete distribution is
+
+$$
+L(\theta)
+  = \prod_{g} \frac{e^{\theta r_g}}{Z(\theta)}
+$$
+
+$Z(\theta)$ is the discrete counterpart of $A_{0:G}(\theta)$. If $m_r$ signature
+genes occupy slot $r$, their joint contribution is the multiplicity
+times the exponential,
+
+$$
+m_r \, e^{\theta r}.
+$$
+
+The likelihood of an untied signature is then
+
+$$
+L(\theta)
+  = \prod_{r=1}^{G}
+      \Biggl( \frac{e^{\theta r}}{Z(\theta)} \Biggr)^{m_r},
+$$
+
+and the log-likelihood is
+
+$$
+\ell(\theta)
+  = \theta \sum_r m_r r - S \log Z(\theta),
+$$
+
+where $S = \sum_r m_r$ is the signature size.
+
+A real cell's universe is dominated by ties: most genes share the lowest count,
+fewer share the next one, and only the top of the ranking resolves into single
+slots. Each count therefore owns a contiguous interval of slots, marked in red
+below the axis.
+
+When a tie is observed, we do not know the rank of the genes in the tie, but we
+know that they are in a contiguous block of slots. A simple (but suboptimal)
+choice for the unknown $r$ within the tie range $a$–$b$ is the midpoint,
+$\bar{r} = (a+b)/2$. In the plot, we can see the contrast between tie distribution and the underlying exponential trend.
+
+```{r disc-picture, fig.height = 3.0, echo = FALSE}
+universe_picture()
+```
+
+The lowest count carries the most genes, so its bar is the tallest even though
+it sits where the exponential is smallest. The genes at the top of the ranking
+have $m_r = 1$, so each of them contributes $e^{\theta r}$ and sits exactly on
+the line.
+
+The five-gene log-likelihood with this midpoint plug-in separates the
+untied ranks from the two genes that share the tie:
+
+$$
+\begin{aligned}
+\ell(\theta \mid i, j, o, z, w)
+  &= \theta \bigl( r_i + r_j + r_o \bigr) \\
+  &\quad + \theta \cdot 2\,\bar{r} \\
+  &\quad - 5 \log Z(\theta).
+\end{aligned}
+$$
+
+## Why this is not enough
+
+While discretisation acknowledges that we have observed rank recurrence in our gene universe (3000 zero ranks), and normalise the property of the tied distribution properly, it does not acknowledge the uncertainty of a large tie yet. Indeed it models the midpoint of a huge rank as highly informative, while the unknown mean rank within the tie is dependent on $\theta$, and hold uncertainty, that increase with the increase of the tie size (compared with the within-tie signature size; e.g. 2 signature genes within a 3000 gene tie).
+
+For an UP signature the mass inside the block sits above the midpoint, under a DOWN
+signature below it. The midpoint plug-in is the uniform special case of the discrete
+model, and it is biased as soon as the signature is UP or DOWN.
+
+# 3. Tie-censoring
+
+The observation for a tied gene is the event $a \le R \le b$. The exponential
+at a point is replaced by the sum of the exponential over every compatible
+slot. For a continuous function this would be an integral, while for a discrete function it is a sum of all possible values.
+
+$$
+e^{\theta r}
+\quad\longrightarrow\quad
+\sum_{r=a}^{b} e^{\theta r}.
+$$
+
+For one signature gene.
+
+$$
+P(a \le R \le b \mid \theta)
+  = \frac{\sum_{r=a}^{b} e^{\theta r}}{Z(\theta)}.
+$$
+
+For our 5-gene signature example, the log-likelihood is
+
+$$
+\begin{aligned}
+\ell(\theta \mid i, j, o, z, w)
+  &= \theta \bigl( r_i + r_j + r_o \bigr) \\
+  &\quad + 2 \log\Bigl( \sum_{r=a}^{b} e^{\theta r} \Bigr) \\
+  &\quad - 5 \log Z(\theta).
+\end{aligned}
+$$
+
+For a signature of $S$ genes, each with its own interval $[a_g, b_g]$,
+
+$$
+\ell(\theta)
+  = \sum_{g}
+    \log\Bigl(\sum_{r = a_g}^{b_g} e^{\theta r}\Bigr)
+  - S \log Z(\theta).
+$$
+
+
