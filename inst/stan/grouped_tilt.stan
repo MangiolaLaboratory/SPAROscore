@@ -14,14 +14,34 @@ functions {
     return log(expm1(x));
   }
 
-  // log sum_{r=lo}^{hi} exp(rate * r). Closed form of the geometric series.
+  // log_sum_exp(rate * lo, rate * (lo + 1), ..., rate * hi): the log of the
+  // total unnormalised mass on one rank interval. The arguments are an
+  // arithmetic sequence, so this is a geometric series and the rank loop
+  // collapses. With t = hi - lo + 1 and rate > 0,
+  //
+  //   log sum_r exp(rate * r)
+  //     = rate * lo + log(exp(rate * t) - 1) - log(exp(rate) - 1).
+  //
+  // theta is one parameter; the sign split is not a second model. log(e^x - 1)
+  // is only real for x > 0, and rate * t is negative when rate is, so the
+  // rate < 0 line factors the same sum from the top of the interval:
+  //
+  //   rate * hi + log(exp(-rate * t) - 1) - log(exp(-rate) - 1).
+  //
+  // Both lines equal rate * lo + log|e^{rate*t} - 1| - log|e^{rate} - 1|.
   real geom_logsum(int lo, int hi, real rate) {
     int t = hi - lo + 1;
     if (abs(rate) < 1e-10) {
       return log(t) + rate * (lo + hi) / 2.0;
     } else if (rate > 0) {
       return rate * lo + geom_log_expm1(rate * t) - geom_log_expm1(rate);
-    } else {
+    } 
+    // The flipped sign only keeps the argument of geom_log_expm1 positive.
+    // Near rate = 0 those two logs cancel, and the sum is
+    // log(t) + rate * (lo + hi) / 2. The loop over signature genes is in the
+    // model block; each gene adds one call, then the shared normaliser on
+    // 1:G is subtracted once per gene.
+  else {
       return rate * hi + geom_log_expm1(-rate * t) - geom_log_expm1(-rate);
     }
   }
