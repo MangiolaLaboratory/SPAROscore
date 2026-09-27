@@ -21,13 +21,13 @@ test_that("discrete_exponential_tie_censored returns the fit and its uncertainty
         signatures = paste0("gene", 1:20)
     )
 
-    expect_named(res, c("score", "se", "theta", "se_theta", "background"))
+    expect_named(res, c("score", "se", "theta_mode", "se_theta", "background"))
     expect_true(is.matrix(res$score))
     expect_equal(nrow(res$score), ncol(counts))
     expect_equal(colnames(res$score), "SPAROscore_tilt")
     expect_true(all(res$score > 0 & res$score < 1))
     expect_equal(dim(res$se), dim(res$score))
-    expect_equal(dim(res$theta), dim(res$score))
+    expect_equal(dim(res$theta_mode), dim(res$score))
     expect_equal(dim(res$se_theta), dim(res$score))
     expect_equal(length(res$background), ncol(counts))
     expect_true(all(res$se > 0))
@@ -48,7 +48,7 @@ test_that("discrete_exponential_tie_censored agrees across matrix-like input cla
     frame <- discrete_exponential_tie_censored(as.data.frame(counts), signature)
 
     expect_equal(as.vector(dense$score), as.vector(sparse$score))
-    expect_equal(as.vector(dense$theta), as.vector(sparse$theta))
+    expect_equal(as.vector(dense$theta_mode), as.vector(sparse$theta_mode))
     expect_equal(as.vector(dense$score), as.vector(frame$score))
 })
 
@@ -112,7 +112,7 @@ test_that("discrete_exponential_tie_censored subtracts down_signatures", {
 
     expect_equal(combined$score, up_only$score - down_only$score)
     expect_equal(combined$se, sqrt(up_only$se^2 + down_only$se^2))
-    expect_equal(combined$theta_down, down_only$theta)
+    expect_equal(combined$theta_down_mode, down_only$theta_mode)
     expect_equal(combined$se_theta_down, down_only$se_theta)
     expect_error(
         discrete_exponential_tie_censored(counts, up,
@@ -135,7 +135,7 @@ test_that("discrete_exponential_tie_censored scores zeros instead of dropping th
     fitted <- discrete_exponential_tie_censored(counts, signature)
 
     expect_true(is.finite(fitted$score[1, 1]))
-    expect_true(fitted$theta[1, 1] < 0)
+    expect_true(fitted$theta_mode[1, 1] < 0)
     expect_true(all(is.finite(fitted$score)))
 })
 
@@ -155,7 +155,7 @@ test_that("discrete_exponential_tie_censored imputes missing genes as uninformat
 
     expect_equal(as.vector(skipped$score),
                  as.vector(discrete_exponential_tie_censored(counts, present)$score))
-    expect_equal(as.vector(imputed$theta), as.vector(skipped$theta),
+    expect_equal(as.vector(imputed$theta_mode), as.vector(skipped$theta_mode),
                  tolerance = 1e-8)
     expect_true(all(imputed$se_theta >= skipped$se_theta - 1e-12))
     expect_error(
@@ -230,7 +230,7 @@ test_that("theta is zero for a signature sitting at the background", {
         signatures = rownames(counts)
     )
 
-    expect_equal(as.vector(fitted$theta), rep(0, ncol(counts)),
+    expect_equal(as.vector(fitted$theta_mode), rep(0, ncol(counts)),
                  tolerance = 1e-6)
     expect_equal(as.vector(fitted$score), unname(fitted$background),
                  tolerance = 1e-9)
@@ -279,8 +279,8 @@ test_that("the grouped likelihood is not the midpoint plug-in", {
     # after fitting an UP-ish signature, the latent mean in the zero block sits
     # above the midpoint
     fitted <- SPAROscore:::.fit_grouped_tilt(lo, hi, G)
-    latent <- SPAROscore:::.geom_mean(lo, hi, fitted[["theta"]] / G)
-    expect_gt(fitted[["theta"]], 0)
+    latent <- SPAROscore:::.geom_mean(lo, hi, fitted[["theta_mode"]] / G)
+    expect_gt(fitted[["theta_mode"]], 0)
     expect_gt(latent[1], (lo[1] + hi[1]) / 2)
     expect_equal(latent[2], 8000)
 })
@@ -356,7 +356,7 @@ test_that("a custom optimiser is called with the tie intervals", {
         optimiser = fake
     )
 
-    expect_equal(unname(res$theta[, 1]), c(0, 0))
+    expect_equal(unname(res$theta_mode[, 1]), c(0, 0))
     expect_equal(length(seen), ncol(counts))
     expect_true(all(vapply(seen, function(x) x$G, integer(1)) == 30L))
     expect_true(all(vapply(seen, function(x) {
@@ -427,14 +427,14 @@ test_that("stan optimiser matches an interior uniroot and stays finite on a flat
         counts, signature, optimiser = "stan",
         cache_stan_model = cache)
 
-    expect_equal(by_stan$theta, by_root$theta, tolerance = 1e-3)
+    expect_equal(by_stan$theta_mode, by_root$theta_mode, tolerance = 1e-3)
     expect_equal(by_stan$se_theta, by_root$se_theta, tolerance = 1e-2)
     expect_true(all(is.finite(by_stan$se_theta)))
     expect_true(all(by_stan$theta_lower < by_stan$theta_median))
     expect_true(all(by_stan$theta_median < by_stan$theta_upper))
     # Interior mode: truncation does not move the median off the mode, and
     # the 95% interval is the normal one with that standard error.
-    expect_equal(by_stan$theta_median, by_stan$theta, tolerance = 1e-6)
+    expect_equal(by_stan$theta_median, by_stan$theta_mode, tolerance = 1e-6)
     z <- stats::qnorm(0.975)
     expect_equal(as.vector(by_stan$theta_upper - by_stan$theta_lower),
                  as.vector(2 * z * by_stan$se_theta), tolerance = 1e-6)
@@ -458,8 +458,8 @@ test_that("stan optimiser matches an interior uniroot and stays finite on a flat
 
     # Every gene shares the single block [1, G], so the likelihood is flat
     # and symmetry puts theta at 0 rather than on the edge of the bracket.
-    expect_equal(unname(root_flat$theta[1, 1]), 0)
-    expect_equal(unname(stan_flat$theta[1, 1]), 0, tolerance = 1e-6)
+    expect_equal(unname(root_flat$theta_mode[1, 1]), 0)
+    expect_equal(unname(stan_flat$theta_mode[1, 1]), 0, tolerance = 1e-6)
     # Flat likelihood: the posterior is the prior, so se_theta is prior_sd.
     expect_equal(unname(stan_flat$se_theta[1, 1]), 1000, tolerance = 1e-6)
     expect_equal(unname(stan_flat$theta_median[1, 1]), 0, tolerance = 1e-6)

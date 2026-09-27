@@ -135,7 +135,7 @@ likelihood on that same interval, plus a
 the curvature of that log posterior at the mode, and `prob` sets the
 central posterior interval around it. The compiled model is
 cached and reused. A function may be supplied instead: it receives `lo`,
-`hi`, `G` and `theta_bound`, and returns `c(score, se, theta, se_theta)`.}
+`hi`, `G` and `theta_bound`, and returns `c(score, se, theta_mode, se_theta)`.}
 
 \item{prior_sd}{Standard deviation of the normal prior on `theta` used when
 `optimiser = "stan"`. The default, 1000, is flat across the range where the
@@ -145,23 +145,24 @@ flat.}
 \item{prob}{Posterior probability covered by the central interval of
 `theta`, used when `optimiser = "stan"`. The default is 0.95. The interval
 is the same normal approximation whose standard deviation is `se_theta`,
-truncated to the bounds on `theta`. Its median is the posterior mode when
-that truncation does not cut the distribution.}
+truncated to the bounds on `theta`. `theta_mode` is the posterior mode.
+`theta_median` equals that mode when the truncation does not cut the
+distribution.}
 
 \item{cache_stan_model}{Directory for the compiled CmdStan executable.
 `NULL` uses the per-user package cache, versioned like
 `sccomp:::load_model()`.}
 }
 \value{
-A named list. `score`, `se`, `theta` and `se_theta` are matrices with one
+A named list. `score`, `se`, `theta_mode` and `se_theta` are matrices with one
 row per sample, cell, or spatial domain and one column per signature.
 `background` is the untilted mean position, one value per column of the
-input. When `down_signatures` is supplied, `theta_down` and `se_theta_down`
-are the tilt of that signature and its standard error.
+input. When `down_signatures` is supplied, `theta_down_mode` and
+`se_theta_down` are the mode of that signature and its standard error.
 
 When `optimiser = "stan"`, the list also contains `theta_median`,
 `theta_lower` and `theta_upper`: the median and the central `prob` interval
-of the posterior of `theta`. The matching `theta_down_median`,
+of the posterior. The matching `theta_down_median`,
 `theta_down_lower` and `theta_down_upper` are included when
 `down_signatures` is supplied.
 
@@ -171,11 +172,11 @@ conditional latent ranks `E[R_i | a_i \le R_i \le b_i, \hat\theta]`,
 written as a position on the unit interval. `background` is the untilted
 mean position, 0.5 on any complete ranking of `G` genes.
 
-`theta` is the fitted tilt: 0 for a signature sitting where an arbitrary gene
-sits, positive for UP and negative for DOWN. Because the likelihood is the
-discrete exponential family on `1:G`, two cells with different tie patterns
-remain comparable on `theta`. Its standard error, `se_theta`, is
-`1 / sqrt(I(theta))`.
+`theta_mode` is the fitted posterior mode: 0 for a signature sitting where
+an arbitrary gene sits, positive for UP and negative for DOWN. Because the
+likelihood is the discrete exponential family on `1:G`, two cells with
+different tie patterns remain comparable on `theta_mode`. Its standard
+error, `se_theta`, is `1 / sqrt(I(theta_mode))`.
 
 A score of `NA` with an infinite standard error marks a column in which no
 signature gene was present to score.
@@ -249,7 +250,7 @@ scores <- discrete_exponential_tie_censored(
 
 scores$score
 scores$se
-scores$theta
+scores$theta_mode
 scores$se_theta
 scores$background
 

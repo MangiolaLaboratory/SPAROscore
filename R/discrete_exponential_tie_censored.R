@@ -194,7 +194,7 @@ max_theoretical_theta <- function(n_genes, signature_size) {
 
     S <- length(lo)
     if (S == 0L) {
-        return(c(score = NA_real_, se = Inf, theta = NA_real_, se_theta = Inf))
+        return(c(score = NA_real_, se = Inf, theta_mode = NA_real_, se_theta = Inf))
     }
 
     theta_bound <- .fit_limit(lo, hi, G, theta_bound)
@@ -247,7 +247,7 @@ max_theoretical_theta <- function(n_genes, signature_size) {
     usable <- is.finite(se_theta) && se_theta > 0
     c(score = (mu_rank - 0.5) / G,
       se = if (usable) slope * se_theta else Inf,
-      theta = theta,
+      theta_mode = theta,
       se_theta = if (usable) se_theta else Inf)
 }
 
@@ -281,7 +281,7 @@ max_theoretical_theta <- function(n_genes, signature_size) {
 
 .with_interval <- function(reported, prob, lower_bound = -Inf, upper_bound = Inf) {
 
-    interval <- .posterior_interval(reported[["theta"]], reported[["se_theta"]],
+    interval <- .posterior_interval(reported[["theta_mode"]], reported[["se_theta"]],
                                     prob, lower_bound, upper_bound)
     c(reported,
       theta_median = unname(interval[["median"]]),
@@ -352,7 +352,7 @@ max_theoretical_theta <- function(n_genes, signature_size) {
 
     S <- length(lo)
     if (S == 0L) {
-        return(c(score = NA_real_, se = Inf, theta = NA_real_, se_theta = Inf,
+        return(c(score = NA_real_, se = Inf, theta_mode = NA_real_, se_theta = Inf,
                  theta_median = NA_real_, theta_lower = NA_real_,
                  theta_upper = NA_real_))
     }
@@ -389,7 +389,7 @@ max_theoretical_theta <- function(n_genes, signature_size) {
     )
     theta <- unname(opt$mle()[["theta"]])
     if (!is.finite(theta)) {
-        return(c(score = NA_real_, se = Inf, theta = NA_real_, se_theta = Inf,
+        return(c(score = NA_real_, se = Inf, theta_mode = NA_real_, se_theta = Inf,
                  theta_median = NA_real_, theta_lower = NA_real_,
                  theta_upper = NA_real_))
     }
@@ -450,8 +450,8 @@ max_theoretical_theta <- function(n_genes, signature_size) {
 #' @param optimiser `"uniroot"`, `"stan"`, or a function. `"uniroot"` solves
 #' the score equation. `"stan"` maximises the same likelihood plus a wide
 #' normal prior with CmdStan's L-BFGS. A function must accept `lo`, `hi`, `G` and
-#' `theta_bound` and return `c(score, se, theta, se_theta)`. `"stan"` also
-#' returns the median and the central posterior interval of `theta`.
+#' `theta_bound` and return `c(score, se, theta_mode, se_theta)`. `"stan"` also
+#' returns `theta_median`, `theta_lower` and `theta_upper`.
 #'
 #' @param prior_sd Standard deviation of the `normal(0, prior_sd)` prior used
 #' when `optimiser = "stan"`.
@@ -463,7 +463,7 @@ max_theoretical_theta <- function(n_genes, signature_size) {
 #' saved and reused. `NULL` uses the per-user package cache.
 #'
 #' @return A list of matrices, each with one row per column of `ranks` and one
-#' column per signature: `score`, `se`, `theta` and `se_theta`. When
+#' column per signature: `score`, `se`, `theta_mode` and `se_theta`. When
 #' `optimiser = "stan"` the list also contains `theta_median`, `theta_lower`
 #' and `theta_upper`. `background` is the untilted mean position (always 0.5
 #' on a complete ranking).
@@ -537,16 +537,17 @@ max_theoretical_theta <- function(n_genes, signature_size) {
             stored_names <- names(fit)
             fit <- as.numeric(fit)
             if (length(fit) < 4L) {
-                stop("SPAROscore says: optimiser must return score, se, theta and se_theta")
+                stop("SPAROscore says: optimiser must return score, se, theta_mode and se_theta")
             }
             if (is.null(stored_names) || any(stored_names == "")) {
-                stored_names <- c("score", "se", "theta", "se_theta")
+                stored_names <- c("score", "se", "theta_mode", "se_theta")
                 if (length(fit) > 4L) {
                     stored_names <- c(stored_names,
                                       paste0("V", seq(5, length(fit))))
                 }
             }
             names(fit) <- stored_names
+            names(fit)[names(fit) == "theta"] <- "theta_mode"
             fit
         })
         do.call(rbind, per_signature)
@@ -632,7 +633,7 @@ max_theoretical_theta <- function(n_genes, signature_size) {
         down_fitted <- score_with(down_list)
         fitted$score <- fitted$score - down_fitted$score
         fitted$se <- sqrt(fitted$se^2 + down_fitted$se^2)
-        fitted$theta_down <- down_fitted$theta
+        fitted$theta_down_mode <- down_fitted$theta_mode
         fitted$se_theta_down <- down_fitted$se_theta
         for (piece in c("median", "lower", "upper")) {
             value <- down_fitted[[paste0("theta_", piece)]]
@@ -726,7 +727,7 @@ max_theoretical_theta <- function(n_genes, signature_size) {
 #' the curvature of that log posterior at the mode, and `prob` sets the
 #' central posterior interval around it. The compiled model is
 #' cached and reused. A function may be supplied instead: it receives `lo`,
-#' `hi`, `G` and `theta_bound`, and returns `c(score, se, theta, se_theta)`.
+#' `hi`, `G` and `theta_bound`, and returns `c(score, se, theta_mode, se_theta)`.
 #'
 #' @param prior_sd Standard deviation of the normal prior on `theta` used when
 #' `optimiser = "stan"`. The default, 1000, is flat across the range where the
@@ -736,23 +737,24 @@ max_theoretical_theta <- function(n_genes, signature_size) {
 #' @param prob Posterior probability covered by the central interval of
 #' `theta`, used when `optimiser = "stan"`. The default is 0.95. The interval
 #' is the same normal approximation whose standard deviation is `se_theta`,
-#' truncated to the bounds on `theta`. Its median is the posterior mode when
-#' that truncation does not cut the distribution.
+#' truncated to the bounds on `theta`. `theta_mode` is the posterior mode.
+#' `theta_median` equals that mode when the truncation does not cut the
+#' distribution.
 #'
 #' @param cache_stan_model Directory for the compiled CmdStan executable.
 #' `NULL` uses the per-user package cache, versioned like
 #' `sccomp:::load_model()`.
 #'
 #' @return
-#' A named list. `score`, `se`, `theta` and `se_theta` are matrices with one
+#' A named list. `score`, `se`, `theta_mode` and `se_theta` are matrices with one
 #' row per sample, cell, or spatial domain and one column per signature.
 #' `background` is the untilted mean position, one value per column of the
-#' input. When `down_signatures` is supplied, `theta_down` and `se_theta_down`
-#' are the tilt of that signature and its standard error.
+#' input. When `down_signatures` is supplied, `theta_down_mode` and
+#' `se_theta_down` are the mode of that signature and its standard error.
 #'
 #' When `optimiser = "stan"`, the list also contains `theta_median`,
 #' `theta_lower` and `theta_upper`: the median and the central `prob` interval
-#' of the posterior of `theta`. The matching `theta_down_median`,
+#' of the posterior. The matching `theta_down_median`,
 #' `theta_down_lower` and `theta_down_upper` are included when
 #' `down_signatures` is supplied.
 #'
@@ -762,11 +764,11 @@ max_theoretical_theta <- function(n_genes, signature_size) {
 #' written as a position on the unit interval. `background` is the untilted
 #' mean position, 0.5 on any complete ranking of `G` genes.
 #'
-#' `theta` is the fitted tilt: 0 for a signature sitting where an arbitrary gene
-#' sits, positive for UP and negative for DOWN. Because the likelihood is the
-#' discrete exponential family on `1:G`, two cells with different tie patterns
-#' remain comparable on `theta`. Its standard error, `se_theta`, is
-#' `1 / sqrt(I(theta))`.
+#' `theta_mode` is the fitted posterior mode: 0 for a signature sitting where
+#' an arbitrary gene sits, positive for UP and negative for DOWN. Because the
+#' likelihood is the discrete exponential family on `1:G`, two cells with
+#' different tie patterns remain comparable on `theta_mode`. Its standard
+#' error, `se_theta`, is `1 / sqrt(I(theta_mode))`.
 #'
 #' A score of `NA` with an infinite standard error marks a column in which no
 #' signature gene was present to score.
@@ -825,7 +827,7 @@ max_theoretical_theta <- function(n_genes, signature_size) {
 #'
 #' scores$score
 #' scores$se
-#' scores$theta
+#' scores$theta_mode
 #' scores$se_theta
 #' scores$background
 #'
