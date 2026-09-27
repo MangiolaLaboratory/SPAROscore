@@ -2,7 +2,12 @@
 
 export(get_ranks)
 export(get_scores)
+export(max_theoretical_theta)
 export(sparoscore)
+export(discrete_exponential_tie_censored)
+export(sparoscore_mle)
 exportMethods(get_ranks)
 exportMethods(get_scores)
 exportMethods(sparoscore)
+exportMethods(discrete_exponential_tie_censored)
+exportMethods(sparoscore_mle)
